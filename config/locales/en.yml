@@ -1,0 +1,48 @@
+en:
+  label_redmine_agent: Redmine Agent
+  label_redmine_agent_placeholder: Ask something...
+  label_redmine_agent_greeting: Hi! How can I help you today?
+  label_redmine_agent_welcome_title: Welcome to Redmine Agent
+  label_redmine_agent_welcome_text: I can help you manage projects, issues, time entries, users, and files in your Redmine workspace. Type your question below to get started.
+  label_redmine_agent_name: Name
+  label_redmine_agent_model: LLM Model
+  label_agent_query: Query Agent
+  label_agent_recents: Recents
+  label_agent_new_chat: New chat
+  label_agent_delete_chat: Delete chat
+  label_agent_send: Send
+  label_agent_history_load_error: Unable to load history.
+  label_agent_delete_confirm: Are you sure you want to delete this chat?
+  label_agent_delete_error: Unable to delete this chat.
+  label_agent_unreachable: Unable to reach the AI agent.
+  label_agent_mcp_unreachable: "Could not reach the MCP server at %{url}. Please check the host name"
+  label_agent_mcp_tools_failed: "Connected to the MCP server, but could not load its tools."
+  label_redmine_agent_url: Server URL
+  label_redmine_agent_api_key: API Key
+  label_redmine_agent_test: Test Model
+  label_redmine_agent_testing: "Testing model..."
+  label_redmine_agent_test_fail: Could not connect to the model.
+  label_redmine_agent_connect_model: Model
+  label_redmine_agent_connected: Connected
+  label_redmine_agent_not_connected: Not connected
+  label_redmine_agent_llm_config: LLM Config
+  label_redmine_agent_powered_by: "Powered by %{model}"
+  label_redmine_agent_instructions: Instructions
+  label_redmine_agent_instructions_hint: "Note: Add instructions that should apply to every chat request"
+  label_redmine_agent_model_hint: "Note: For multiple models, use commas.For eg. claude-sonnet-5,claude-opus-5,qwen/qwen3.6-27b,gemini-3.6-flash"
+  label_redmine_agent_duplicate: An agent with this name already exists.
+  label_redmine_agent_select_row: Please select an LLM from the list.
+  label_redmine_agent_mcp_status: MCP Plugin
+  label_installed: Installed
+  label_not_installed: Not Installed
+  error_agent_no_model_config: "No model is configured. Please add a model in the plugin settings."
+  error_agent_mcp_not_installed: "The MCP plugin is not installed. Please install the redmine_mcp plugin to enable the agent's tools."
+  error_agent_rest_api_disabled: "The REST web service is disabled. Please enable it in Administration → Settings → Integrations."
+  label_redmine_agent_hitl: "Human in the loop for  Create / Update actions"
+  label_redmine_agent_hitl_hint: "Note: When enabled, Requires approval for DB operations."
+  label_agent_approval_approve: "Approve"
+  label_agent_approval_reject: "Reject"
+  label_agent_approval_prompt: "Please review this action and approve or reject it."
+  label_agent_action_cancelled: "Cancelled — the action was not carried out. Let me know if you'd like to change anything and try again."
+  label_agent_no_reply: "Sorry, I could not complete that request. Please try rephrasing it."
+  label_agent_tool_unavailable: "I can't do that here — the %{action} action isn't available."
