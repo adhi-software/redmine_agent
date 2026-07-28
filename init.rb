@@ -48,6 +48,6 @@ Redmine::Plugin.register :redmine_agent do
   Redmine::MenuManager.map :agent_menu do |menu|
     menu.push :ai_agent_query,
               { controller: 'redmine_agent', action: 'index' },
-              caption: :label_redmine_agent
+              caption: :label_agent_query
   end
 end

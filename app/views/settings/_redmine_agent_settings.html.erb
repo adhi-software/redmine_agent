@@ -133,7 +133,7 @@
       <th align="left" style="width:90px; white-space:nowrap; vertical-align:top;"><label><%= l(:label_redmine_agent_model) %></label></th>
       <td>
         <%= text_field_tag 'agent_model', '', id: 'agent_model', style: 'width:100%; box-sizing:border-box;' %>
-        <%= l(:label_redmine_agent_model_hint) %>
+        <%= simple_format(l(:label_redmine_agent_model_hint)) %>
       </td>
     </tr>
     <tr>

@@ -84,16 +84,17 @@ module RedmineAgentHelper
     nil
   end
 
-  DEFAULT_AGENT_NAME = 'Redmine Agent'.freeze
-
-  # Looked up case-insensitively so the row is found whatever the database's
-  # collation. The retry covers the unique-index race between the lookup and
-  # the insert (two concurrent first requests).
+  # Named from the menu caption, forced to :en so the row is looked up under one
+  # stable name whatever language the user browses in. Looked up
+  # case-insensitively so the row is found whatever the database's collation.
+  # The retry covers the unique-index race between the lookup and the insert
+  # (two concurrent first requests).
   def default_agent
-    AiAgent.named(DEFAULT_AGENT_NAME).first ||
-      AiAgent.create!(name: DEFAULT_AGENT_NAME, description: 'Default Redmine chat agent')
+    name = I18n.t(:label_agent_query, locale: :en)
+    AiAgent.named(name).first ||
+      AiAgent.create!(name: name, description: 'Default Redmine chat agent')
   rescue ActiveRecord::RecordNotUnique
-    AiAgent.named(DEFAULT_AGENT_NAME).first
+    AiAgent.named(name).first
   end
 
   def mcp_server_url

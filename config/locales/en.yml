@@ -29,7 +29,7 @@ en:
   label_redmine_agent_powered_by: "Powered by %{model}"
   label_redmine_agent_instructions: Instructions
   label_redmine_agent_instructions_hint: "Note: Add instructions that should apply to every chat request"
-  label_redmine_agent_model_hint: "Note: For multiple models, use commas.For eg. claude-sonnet-5,claude-opus-5,qwen/qwen3.6-27b,gemini-3.6-flash"
+  label_redmine_agent_model_hint: "Note: For multiple models, use commas.\nFor eg. claude-sonnet-5, claude-opus-5, qwen/qwen3.6-27b, gemini-3.6-flash"
   label_redmine_agent_duplicate: An agent with this name already exists.
   label_redmine_agent_select_row: Please select an LLM from the list.
   label_redmine_agent_mcp_status: MCP Plugin

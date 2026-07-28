@@ -8,9 +8,9 @@
   config_errors = agent_helper.show_agent_menu?
 
   # First LLM row (name|model|server_url|api_key|connected) — the one chat uses.
-  # Its model field may list several models; the first is the one tried first.
-  agent_model = Array(Setting.plugin_redmine_agent['agents']).reject(&:blank?)
-                     .first.to_s.split('|', 5)[1].to_s.split(',').first.to_s.strip
+  # The footer shows the row's configured name, not the model id.
+  agent_name = Array(Setting.plugin_redmine_agent['agents']).reject(&:blank?)
+                    .first.to_s.split('|', 5)[0].to_s.strip
 %>
 
 <% if config_errors.any? %>
@@ -82,11 +82,11 @@
         </div>
       </form>
 
-      <%# content_tag escapes the configured model name. %>
-      <% if agent_model.present? %>
+      <%# content_tag escapes the configured name. %>
+      <% if agent_name.present? %>
         <div id="agent-powered-by">
           <%= raw l(:label_redmine_agent_powered_by,
-                    model: content_tag(:span, agent_model, class: 'agent-model-name')) %>
+                    model: content_tag(:span, agent_name, class: 'agent-model-name')) %>
         </div>
       <% end %>
     </main>
