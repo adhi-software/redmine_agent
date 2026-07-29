@@ -1,0 +1,452 @@
+<%
+  # Each configured agent is stored as a pipe-encoded row:
+  #   name|model|server_url|api_key|connect_model
+  # where name is a free-text label (the API to call is decided by the host) and
+  # connect_model is the 1/0 result of the last Test Model run. The list box
+  # shows a masked label (the API key is never shown), but the option *value*
+  # keeps the full row so it round-trips on save.
+  agent_helper = Object.new.extend(RedmineAgentHelper)
+  agents = Array(settings['agents']).reject(&:blank?)
+  agent_options = agents.map do |row|
+    parts      = row.to_s.split('|', 5)
+    type       = parts[0].to_s
+    model      = parts[1].to_s
+    server_url = parts[2].to_s
+    api_key    = parts[3].to_s
+
+    label = type
+    label += "  |  #{model}"      if model.present?
+    label += "  |  #{server_url}" if server_url.present?
+    label += "  |  ****"          if api_key.present?
+    [label, row]
+  end
+
+  is_mcp_install = agent_helper.mcp_installed?
+%>
+
+<div class="agent-config-row" style="display:flex; align-items:flex-start; padding:3px 0;">
+  <label for="settings_agents" style="flex:0 0 295px; width:295px; margin:0 5px 0 0; float:none; text-align:end; font-weight:bold; line-height:24px;"><%= l(:label_redmine_agent_llm_config) %></label>
+  <div style="flex:1 1 auto; min-width:0;">
+    <%= select_tag 'settings[agents]',
+          options_for_select(agent_options),
+          multiple: true, size: 6, id: 'settings_agents',
+          class: 'multi-row', style: 'display:none;' %>
+    <ul id="settings_agents_view" class="agents-sortable"></ul>
+  </div>
+</div>
+<p>
+  <%= link_to l(:button_add),    "javascript:showAgentDialog('Add');",  class: 'button' %> |
+  <%= link_to l(:button_edit),   "javascript:showAgentDialog('Edit');", class: 'button' %> |
+  <%= link_to l(:button_delete), "javascript:removeSelectedAgent();",   class: 'button' %>
+</p>
+
+<p>
+  <label for="settings_instructions"><strong><%= l(:label_redmine_agent_instructions) %></strong></label>
+  <%# The plugin default seeds this on install only; once saved, a cleared box stays blank. %>
+  <%= text_area_tag 'settings[instructions]', settings['instructions'],
+        id: 'settings_instructions', rows: 8,
+        style: 'width:520px; max-width:100%; box-sizing:border-box;' %></br>
+  <%= l(:label_redmine_agent_instructions_hint) %>
+</p>
+
+<p>
+  <label for="settings_human_in_the_loop"><strong><%= l(:label_redmine_agent_hitl) %></strong></label>
+  <%= hidden_field_tag 'settings[human_in_the_loop]', '0', id: nil %>
+  <%= check_box_tag 'settings[human_in_the_loop]', '1',
+        settings['human_in_the_loop'].to_s == '1',
+        id: 'settings_human_in_the_loop' %>
+  <%= l(:label_redmine_agent_hitl_hint) %>
+</p>
+
+<p>
+  <label><strong><%= l(:label_redmine_agent_mcp_status) %></strong></label>
+  <% if is_mcp_install %>
+    <span class="mcp-status-ok"><%= sprite_icon('checked') %></span>
+    <strong><%= l(:label_installed) %></strong>
+  <% else %>
+    <span class="mcp-status-bad">
+      <svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 6 L6 18 M6 6 L18 18"/>
+      </svg>
+    </span>
+    <%= l(:label_not_installed) %>
+  <% end %>
+</p>
+
+<style type="text/css">
+  .mcp-status-ok  .icon-svg,
+  .mcp-status-bad .icon-svg { width: 1.5rem; height: 1.5rem; vertical-align: middle; stroke-width: 2.5; }
+  .mcp-status-ok  .icon-svg { stroke: #28a745; stroke-width: 4.5; }
+  .mcp-status-bad .icon-svg { stroke: #dc3545; stroke-width: 4.5; }
+
+  .agent-config-dialog .ui-dialog-buttonpane { text-align: right; padding: 8px 12px; }
+  .agent-config-dialog .ui-dialog-buttonpane .ui-dialog-buttonset { float: none; }
+  .agent-config-dialog .ui-dialog-buttonpane button {
+    display: inline-block;
+    vertical-align: middle;
+    margin: 0 0 0 8px;
+  }
+
+  /* Looks like a native multi-select listbox; each row is drag-sortable. */
+  .agents-sortable {
+    list-style: none; margin: 0; padding: 0;
+    width: 320px; max-width: 100%; height: 120px; overflow-y: auto;
+    border: 1px solid #a9a9a9;
+    box-sizing: border-box;
+    font-size: 0.9em; line-height: 1.4;
+  }
+  .agents-sortable li { margin: 0 !important; }
+  .agents-sortable .agent-item {
+    display: flex; align-items: center; gap: 6px;
+    padding: 1px 4px; cursor: move;
+  }
+  .agents-sortable .agent-text {
+    flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .agents-sortable .agent-handle {
+    flex: 0 0 auto; color: #555; cursor: grab;
+    font-weight: bold; font-size: 1.1em;
+  }
+  .agents-sortable .agent-item.selected .agent-handle { color: #e6f0fa; }
+  .agents-sortable .agent-item.selected { background: #3b93d9; color: #fff; }
+  .agents-sortable .agent-item.dragging { opacity: 0.4; }
+  .agents-sortable .agent-item.drop-target { border-top: 2px solid #3b93d9; }
+
+  /* Only shown while testing and on failure — success speaks through the icon. */
+  .agent-test-status { display: inline-block; margin-top: 6px; font-size: 1.1em; }
+  .agent-test-status.fail    { color: #dc3545; }
+
+  /* Connected / Not connected indicator, styled like the MCP status row. */
+  .agent-conn-status { display: inline-flex; align-items: center; gap: 3px; }
+  .agent-conn-status .icon-svg { width: 1.2rem; height: 1.2rem; stroke-width: 4.5; }
+  .agent-conn-status.ok   .icon-svg { stroke: #28a745; }
+  .agent-conn-status.fail .icon-svg { stroke: #dc3545; }
+</style>
+
+<div id="agent-dlg" title="<%= l(:label_redmine_agent_llm_config) %>" style="display:none;">
+  <table style="width:100%; border-spacing:8px 10px; border-collapse:separate; table-layout:fixed;">
+    <tr>
+      <th align="left" style="width:90px; white-space:nowrap; vertical-align:top;"><label><%= l(:label_redmine_agent_name) %></label></th>
+      <td><%= text_field_tag 'agent_name', '', id: 'agent_name', style: 'width:100%; box-sizing:border-box;' %></td>
+    </tr>
+    <tr>
+      <th align="left" style="width:90px; white-space:nowrap; vertical-align:top;"><label><%= l(:label_redmine_agent_model) %></label></th>
+      <td>
+        <%= text_field_tag 'agent_model', '', id: 'agent_model', style: 'width:100%; box-sizing:border-box;' %>
+        <%= simple_format(l(:label_redmine_agent_model_hint)) %>
+      </td>
+    </tr>
+    <tr>
+      <th align="left" style="width:90px; white-space:nowrap; vertical-align:top;"><label><%= l(:label_redmine_agent_url) %></label></th>
+      <td><%= text_field_tag 'agent_server_url', '', id: 'agent_server_url', style: 'width:100%; box-sizing:border-box;' %></td>
+    </tr>
+    <tr>
+      <th align="left" style="width:90px; white-space:nowrap; vertical-align:top;"><label><%= l(:label_redmine_agent_api_key) %></label></th>
+      <td><%= password_field_tag 'agent_api_key', '', id: 'agent_api_key', autocomplete: 'off', style: 'width:100%; box-sizing:border-box;' %></td>
+    </tr>
+    <tr>
+      <th align="left" style="width:90px; white-space:nowrap; vertical-align:top;"><label><%= l(:label_redmine_agent_connect_model) %></label></th>
+      <td>
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+          <span id="agent-conn-status" class="agent-conn-status"></span>
+          <%= link_to l(:label_redmine_agent_test), "javascript:testAgentModel();", id: 'agent-test-model' %>
+        </div>
+        <span id="agent-test-status" class="agent-test-status"></span>
+      </td>
+    </tr>
+  </table>
+</div>
+
+<script type="text/javascript">
+//<![CDATA[
+var agentAction = "";
+// Last Test Model verdict for the open dialog; saved as the row's 5th field.
+var agentConnected = false;
+var LBL_AGENT_NAME    = "<%= escape_javascript(l(:label_redmine_agent_name)) %>";
+var LBL_AGENT_MODEL   = "<%= escape_javascript(l(:label_redmine_agent_model)) %>";
+var LBL_AGENT_INVALID = "<%= escape_javascript(l('activerecord.errors.messages.invalid')) %>";
+var LBL_AGENT_DUPLICATE     = "<%= escape_javascript(l(:label_redmine_agent_duplicate)) %>";
+var LBL_AGENT_SELECT        = "<%= escape_javascript(l(:label_redmine_agent_select_row)) %>";
+var LBL_AGENT_DELETE        = "<%= escape_javascript(l(:text_are_you_sure)) %>";
+var LBL_AGENT_TESTING       = "<%= escape_javascript(l(:label_redmine_agent_testing)) %>";
+var LBL_AGENT_TEST_FAIL     = "<%= escape_javascript(l(:label_redmine_agent_test_fail)) %>";
+var LBL_AGENT_CONNECTED     = "<%= escape_javascript(l(:label_redmine_agent_connected)) %>";
+var LBL_AGENT_NOT_CONNECTED = "<%= escape_javascript(l(:label_redmine_agent_not_connected)) %>";
+var AGENT_TEST_URL          = "<%= escape_javascript(url_for(controller: '/redmine_agent', action: 'test_model')) %>";
+var AGENT_CSRF_TOKEN        = "<%= escape_javascript(form_authenticity_token) %>";
+
+function agentListbox() { return document.getElementById("settings_agents"); }
+
+function renderAgentList() {
+  var box = agentListbox();
+  var ul  = document.getElementById("settings_agents_view");
+  if (!box || !ul) { return; }
+  ul.innerHTML = "";
+  for (var i = 0; i < box.options.length; i++) {
+    var li = document.createElement("li");
+    li.className = "agent-item" + (i === box.selectedIndex ? " selected" : "");
+    li.dataset.index = i;
+    li.draggable = true;
+
+    var text = document.createElement("span");
+    text.className = "agent-text";
+    text.textContent = box.options[i].text;
+
+    var handle = document.createElement("span");
+    handle.className = "agent-handle";
+    handle.textContent = "⇅";   // ⇅ up/down arrows — signals the row is draggable
+    handle.setAttribute("aria-hidden", "true");
+
+    li.appendChild(text);
+    li.appendChild(handle);   // handle on the right
+    ul.appendChild(li);
+  }
+}
+
+function moveAgent(from, to) {
+  var box = agentListbox();
+  if (!box || from === to || isNaN(from) || isNaN(to)) { return; }
+  var moving = box.options[from], target = box.options[to];
+  box.insertBefore(moving, from < to ? target.nextSibling : target);
+  box.selectedIndex = Array.prototype.indexOf.call(box.options, moving);
+  renderAgentList();
+}
+
+// Clear the message under the Test button. Only the connected flag is stored,
+// so the dialog reopens with the indicator set but no message text.
+function resetAgentTestStatus() {
+  var st = document.getElementById("agent-test-status");
+  if (st) { st.textContent = ""; st.className = "agent-test-status"; }
+}
+
+// Green tick / red cross beside the Test button, same icons as the MCP row.
+function setAgentConnected(connected) {
+  agentConnected = !!connected;
+  var el = document.getElementById("agent-conn-status");
+  if (!el) { return; }
+  var path = agentConnected ? "M20 6 L9 17 L4 12" : "M18 6 L6 18 M6 6 L18 18";
+  el.className = "agent-conn-status " + (agentConnected ? "ok" : "fail");
+  el.textContent = "";
+  el.insertAdjacentHTML("beforeend",
+    '<svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke-linecap="round" ' +
+    'stroke-linejoin="round" aria-hidden="true"><path d="' + path + '"/></svg>');
+  el.appendChild(document.createTextNode(agentConnected ? LBL_AGENT_CONNECTED : LBL_AGENT_NOT_CONNECTED));
+}
+
+// Send a sample request to the configured URL/API key and show the result in
+// the status message beside the button.
+function testAgentModel() {
+  var name   = (document.getElementById("agent_name").value || "").trim();
+  var model  = (document.getElementById("agent_model").value || "").trim();
+  var server = (document.getElementById("agent_server_url").value || "").trim();
+  var key    = (document.getElementById("agent_api_key").value || "").trim();
+  var st     = document.getElementById("agent-test-status");
+
+  st.textContent = LBL_AGENT_TESTING;
+  st.className = "agent-test-status testing";
+
+  jQuery.ajax({
+    url: AGENT_TEST_URL,
+    method: "POST",
+    dataType: "json",
+    data: {
+      name: name,
+      model: model,
+      server_url: server,
+      api_key: key,
+      authenticity_token: AGENT_CSRF_TOKEN
+    }
+  }).done(function (resp) {
+    if (resp && resp.success) {
+      resetAgentTestStatus();
+      setAgentConnected(true);
+    } else {
+      st.textContent = (resp && resp.message) || LBL_AGENT_TEST_FAIL;
+      st.className = "agent-test-status fail";
+      setAgentConnected(false);
+    }
+  }).fail(function (xhr) {
+    var msg = LBL_AGENT_TEST_FAIL;
+    try { var j = JSON.parse(xhr.responseText); if (j && j.message) { msg = j.message; } } catch (e) {}
+    st.textContent = msg;
+    st.className = "agent-test-status fail";
+    setAgentConnected(false);
+  });
+}
+
+function agentMaskedLabel(n, m, s, k) {
+  var label = n;
+  if (m) { label += "  |  " + m; }
+  if (s) { label += "  |  " + s; }
+  if (k) { label += "  |  ****"; }
+  return label;
+}
+
+// Duplicate check by name (first field), ignoring the row being edited.
+function agentNameExists(box, name, skipIndex) {
+  for (var i = 0; i < box.options.length; i++) {
+    if (i === skipIndex) { continue; }
+    if (box.options[i].value.split("|")[0].toLowerCase() === name.toLowerCase()) { return true; }
+  }
+  return false;
+}
+
+// Initialise the jQuery-UI dialog on demand. Doing it here (rather than only on
+// $(document).ready) means it still works even if another plugin's ready
+// handler throws and aborts the ready chain before ours would have run.
+function ensureAgentDialog() {
+  var $dlg = jQuery("#agent-dlg");
+  // Already initialised? jQuery-UI adds this class to the dialog content node.
+  if ($dlg.hasClass("ui-dialog-content")) { return $dlg; }
+  $dlg.dialog({
+    autoOpen: false,
+    resizable: false,
+    modal: false,
+    width: 440,
+    dialogClass: 'agent-config-dialog',
+    buttons: {
+      "Ok": function () {
+        var box    = agentListbox();
+        var name   = (document.getElementById("agent_name").value || "").trim();
+        var model  = (document.getElementById("agent_model").value || "").trim();
+        var server = (document.getElementById("agent_server_url").value || "").trim();
+        var key    = (document.getElementById("agent_api_key").value || "").trim();
+        var editIndex = ("Edit" === agentAction) ? box.selectedIndex : -1;
+
+        if (name === "") { alert(LBL_AGENT_NAME + " " + LBL_AGENT_INVALID); return; }
+        if (model === "") { alert(LBL_AGENT_MODEL + " " + LBL_AGENT_INVALID); return; }
+        if (agentNameExists(box, name, editIndex)) { alert(LBL_AGENT_DUPLICATE); return; }
+
+        var opt;
+        if ("Add" === agentAction) {
+          opt = document.createElement("option");
+          box.options.add(opt);
+        } else {
+          opt = box.options[box.selectedIndex];
+        }
+        opt.value = [name, model, server, key, agentConnected ? "1" : "0"].join("|");
+        opt.text  = agentMaskedLabel(name, model, server, key);
+        if ("Add" === agentAction) { box.selectedIndex = box.options.length - 1; }
+        renderAgentList();
+        jQuery(this).dialog("close");
+      },
+      "Cancel": function () { jQuery(this).dialog("close"); }
+    }
+  });
+  return $dlg;
+}
+
+function showAgentDialog(action) {
+  var box = agentListbox();
+  var $dlg = ensureAgentDialog();
+  if ("Add" === action) {
+    agentAction = action;
+    document.getElementById("agent_name").value = "";
+    document.getElementById("agent_model").value = "";
+    document.getElementById("agent_server_url").value = "";
+    document.getElementById("agent_api_key").value = "";
+    resetAgentTestStatus();
+    setAgentConnected(false);
+    $dlg.dialog("open");
+  } else if ("Edit" === action && box != null && box.selectedIndex >= 0) {
+    agentAction = action;
+    var parts = box.options[box.selectedIndex].value.split("|");
+    document.getElementById("agent_name").value       = parts[0] || "";
+    document.getElementById("agent_model").value      = parts[1] || "";
+    document.getElementById("agent_server_url").value = parts[2] || "";
+    document.getElementById("agent_api_key").value    = parts[3] || "";
+    resetAgentTestStatus();
+    setAgentConnected(parts[4] === "1");
+    $dlg.dialog("open");
+  } else if (box != null && box.options.length > 0) {
+    alert(LBL_AGENT_SELECT);
+  }
+}
+
+function removeSelectedAgent() {
+  var box = agentListbox();
+  if (box != null && box.selectedIndex >= 0) {
+    if (confirm(LBL_AGENT_DELETE)) {
+      for (var i = box.options.length - 1; i >= 0; i--) {
+        if (box.options[i].selected) { box.remove(i); }
+      }
+      renderAgentList();
+    }
+  } else if (box != null && box.options.length > 0) {
+    alert(LBL_AGENT_SELECT);
+  }
+}
+
+(function () {
+  // Editing a connection field invalidates an earlier test, so neither the
+  // message nor the indicator refers to settings it wasn't run against.
+  ["agent_model", "agent_server_url", "agent_api_key"].forEach(function (id) {
+    var field = document.getElementById(id);
+    if (field) {
+      field.addEventListener("input", function () {
+        resetAgentTestStatus();
+        setAgentConnected(false);
+      });
+    }
+  });
+
+  var box = agentListbox();
+  var ul  = document.getElementById("settings_agents_view");
+  if (!box || !ul) { return; }
+
+  // A multi-select drops unselected options on submit, so select them all first
+  // to post every row back — in list order.
+  var form = box.form || box.closest("form");
+  if (form) {
+    form.addEventListener("submit", function () {
+      for (var i = 0; i < box.options.length; i++) { box.options[i].selected = true; }
+    });
+  }
+
+  var itemAt = function (e) { return e.target.closest("li.agent-item"); };
+
+  ul.addEventListener("click", function (e) {
+    var li = itemAt(e);
+    if (li) { box.selectedIndex = +li.dataset.index; renderAgentList(); }
+  });
+  ul.addEventListener("dblclick", function (e) {
+    var li = itemAt(e);
+    if (li) { box.selectedIndex = +li.dataset.index; showAgentDialog("Edit"); }
+  });
+
+  // Native HTML5 drag-and-drop reordering.
+  var dragFrom = null, dragLi = null;
+  ul.addEventListener("dragstart", function (e) {
+    var li = itemAt(e);
+    if (!li) { return; }
+    dragFrom = +li.dataset.index;
+    dragLi = li;
+    e.dataTransfer.effectAllowed = "move";
+    // Required for the drag to actually start in Firefox.
+    e.dataTransfer.setData("text/plain", li.dataset.index);
+    setTimeout(function () { li.classList.add("dragging"); }, 0);
+  });
+  ul.addEventListener("dragover", function (e) {
+    e.preventDefault();   // required to allow a drop
+    e.dataTransfer.dropEffect = "move";
+    var li = itemAt(e);
+    for (var i = 0; i < ul.children.length; i++) { ul.children[i].classList.remove("drop-target"); }
+    if (li && li !== dragLi) { li.classList.add("drop-target"); }
+  });
+  ul.addEventListener("drop", function (e) {
+    e.preventDefault();
+    var li = itemAt(e);
+    if (li && dragFrom !== null) { moveAgent(dragFrom, +li.dataset.index); }
+    dragFrom = null; dragLi = null;
+  });
+  ul.addEventListener("dragend", function () {
+    dragFrom = null; dragLi = null;
+    for (var i = 0; i < ul.children.length; i++) {
+      ul.children[i].classList.remove("dragging", "drop-target");
+    }
+  });
+
+  renderAgentList();
+})();
+//]]>
+</script>

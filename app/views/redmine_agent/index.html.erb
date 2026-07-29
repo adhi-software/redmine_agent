@@ -1,0 +1,101 @@
+<% content_for :header_tags do %>
+  <%= stylesheet_link_tag 'redmine_agent', plugin: 'redmine_agent' %>
+<% end %>
+<%= javascript_include_tag 'redmine_agent', plugin: 'redmine_agent' %>
+
+<%
+  agent_helper  = Object.new.extend(RedmineAgentHelper)
+  config_errors = agent_helper.show_agent_menu?
+
+  # First LLM row (name|model|server_url|api_key|connected) — the one chat uses.
+  # The footer shows the row's configured name, not the model id.
+  agent_name = Array(Setting.plugin_redmine_agent['agents']).reject(&:blank?)
+                    .first.to_s.split('|', 5)[0].to_s.strip
+%>
+
+<% if config_errors.any? %>
+  <%# Not usable yet — show only the error. The .agent-config-error class lets
+      redmine_agent.css hide the theme's left nav / toggle and un-shift #main. %>
+  <div class="flash error agent-config-error"><%= config_errors.join(' ') %></div>
+<% else %>
+
+  <div id="redmine-agent-page" data-chat-url="<%= @chat_url %>" data-history-url="<%= @history_url %>" data-clear-url="<%= @clear_url %>" data-greeting="<%= @greeting %>" data-welcome-title="<%= l(:label_redmine_agent_welcome_title) %>" data-welcome-text="<%= l(:label_redmine_agent_welcome_text) %>"
+      data-i18n-loading="<%= l(:label_loading) %>"
+      data-i18n-history-error="<%= l(:label_agent_history_load_error) %>"
+      data-i18n-history-empty="<%= l(:label_no_data) %>"
+      data-i18n-delete-title="<%= l(:button_delete) %>"
+      data-i18n-delete-confirm="<%= l(:label_agent_delete_confirm) %>"
+      data-i18n-delete-error="<%= l(:label_agent_delete_error) %>"
+      data-i18n-unreachable="<%= l(:label_agent_unreachable) %>"
+      data-i18n-approval-approve="<%= l(:label_agent_approval_approve) %>"
+      data-i18n-approval-reject="<%= l(:label_agent_approval_reject) %>"
+      <%# With approval turned off nothing is ever gated, so the buttons stay
+          hidden even on a reply stored back when it was on. %>
+      data-hitl="<%= Setting.plugin_redmine_agent['human_in_the_loop'].to_s == '1' ? '1' : '0' %>">
+
+    <%# ── CHAT AREA ── %>
+    <main id="agent-chat-area">
+      <div id="agent-chat-header">
+        <div class="chat-header-left">
+          <div class="chat-header-info">
+            <h2><%= l(:label_redmine_agent) %></h2>
+          </div>
+        </div>
+        <div class="chat-header-actions">
+          <button id="agent-new-chat" class="primary" type="button" title="<%= l(:label_agent_new_chat) %>">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 13H13v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>
+          </button>
+          <button id="agent-clear-chat" class="danger" type="button" title="<%= l(:label_agent_delete_chat) %>" disabled>
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+          </button>
+          <button id="agent-history-chat" class="primary" type="button" title="<%= l(:label_agent_recents) %>">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 12c0 1.1-.9 2-2 2s-2-.9-2-2 .9-2 2-2 2 .9 2 2zm6 0c0 1.1-.9 2-2 2s-2-.9-2-2 .9-2 2-2 2 .9 2 2zm6 0c0 1.1-.9 2-2 2s-2-.9-2-2 .9-2 2-2 2 .9 2 2z"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div id="agent-history-panel" class="agent-history-panel" hidden>
+        <div class="agent-history-panel-header">
+          <span><%= l(:label_agent_recents) %></span>
+          <button id="agent-history-close" type="button" title="<%= l(:button_close) %>">&times;</button>
+        </div>
+        <div id="agent-history-list" class="agent-history-list"></div>
+      </div>
+
+      <div id="agent-chat-messages">
+        <div class="agent-welcome">
+          <div class="welcome-icon">
+            <svg viewBox="0 0 24 24" width="40" height="40" fill="currentColor"><path d="M12 2a2 2 0 0 1 2 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1.07A7.001 7.001 0 0 1 14 23h-4a7.001 7.001 0 0 1-6.93-4H2a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h1a7 7 0 0 1 7-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 0 1 2-2zM9 15a1 1 0 1 0 0 2 1 1 0 0 0 0-2zm6 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2z"/></svg>
+          </div>
+          <h3><%= l(:label_redmine_agent_welcome_title) %></h3>
+          <p><%= l(:label_redmine_agent_welcome_text) %></p>
+        </div>
+      </div>
+
+      <form id="agent-chat-form">
+        <div class="chat-input-wrapper">
+          <textarea id="agent-chat-input" autocomplete="off" rows="1"
+                    placeholder="<%= l(:label_redmine_agent_placeholder, default: 'Ask something...') %>"></textarea>
+          <button type="submit" id="agent-chat-send" title="<%= l(:label_agent_send) %>">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+          </button>
+        </div>
+      </form>
+
+      <%# content_tag escapes the configured name. %>
+      <% if agent_name.present? %>
+        <div id="agent-powered-by">
+          <%= raw l(:label_redmine_agent_powered_by,
+                    model: content_tag(:span, agent_name, class: 'agent-model-name')) %>
+        </div>
+      <% end %>
+    </main>
+
+  </div>
+
+  <script type="application/json" id="agent-initial-chat">
+    <%= raw(@initial_chat.present? ? @initial_chat.to_json.gsub('/', '\/') : 'null') %>
+  </script>
+
+
+<% end %>
