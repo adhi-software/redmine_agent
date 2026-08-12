@@ -7,7 +7,9 @@ en:
   label_redmine_agent_name: Name
   label_redmine_agent_model: LLM Model
   label_agent_query: Query Agent
+  label_agent: Agent
   label_agent_recents: Recents
+  label_agent_no_chats: No conversations yet
   label_agent_new_chat: New chat
   label_agent_delete_chat: Delete chat
   label_agent_send: Send
@@ -36,12 +38,11 @@ en:
   label_installed: Installed
   label_not_installed: Not Installed
   error_agent_no_model_config: "No model is configured. Please add a model in the plugin settings."
-  error_agent_mcp_not_installed: "The MCP plugin is not installed. Please install the redmine_mcp plugin to enable the agent's tools."
   error_agent_rest_api_disabled: "The REST web service is disabled. Please enable it in Administration → Settings → Integrations."
   label_redmine_agent_hitl: "Human in the loop for  Create / Update actions"
   label_redmine_agent_hitl_hint: "Note: When enabled, Requires approval for DB operations."
-  label_agent_approval_approve: "Approve"
-  label_agent_approval_reject: "Reject"
+  label_agent_approval_approve: Approve
+  label_agent_approval_reject: Reject
   label_agent_approval_prompt: "Please review this action and approve or reject it."
   label_agent_action_cancelled: "Cancelled — the action was not carried out. Let me know if you'd like to change anything and try again."
   label_agent_no_reply: "Sorry, I could not complete that request. Please try rephrasing it."

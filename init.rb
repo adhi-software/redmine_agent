@@ -1,3 +1,5 @@
+require_relative './lib/agent_hook'
+
 Rails.application.config.after_initialize do
   # ERPmine overrides render_main_menu but introduces a bug: it ignores the
   # controller.current_menu and hardcodes its own menu_name() logic.
