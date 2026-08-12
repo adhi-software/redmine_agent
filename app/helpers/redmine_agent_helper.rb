@@ -111,9 +111,8 @@ module RedmineAgentHelper
 
   def show_agent_menu?
     errors = []
-    errors << I18n.t(:error_agent_no_model_config)  unless agent_model_configured?
-    errors << I18n.t(:error_agent_mcp_not_installed) unless mcp_installed?
-    errors << I18n.t(:error_agent_rest_api_disabled) unless Setting.rest_api_enabled?
+    errors << I18n.t(:error_agent_no_model_config) unless agent_model_configured?
+    errors << I18n.t(:error_agent_rest_api_disabled) if mcp_installed? && !Setting.rest_api_enabled?
     errors
   end
 end
