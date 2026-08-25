@@ -38,7 +38,7 @@ Redmine::Plugin.register :redmine_agent do
     'instructions'   => "Never expose another user's information to non-admin users.\n" \
                         "Reject all delete requests by default.",
     # When enabled, create/update/delete tool calls require manual user approval.
-    'human_in_the_loop' => '0',
+    'human_in_the_loop' => '1',
   })
 
   # Top-bar entry
