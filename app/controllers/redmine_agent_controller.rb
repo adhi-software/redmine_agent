@@ -1,3 +1,20 @@
+# Redmine Agent
+# Copyright (C) 2026-  Adhi software pvt ltd
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+
 require 'net/http'
 require 'openssl'
 require 'uri'
@@ -36,7 +53,9 @@ class RedmineAgentController < ApplicationController
     message = params[:message].to_s.strip
     return render json: { error: 'Empty message' }, status: :unprocessable_entity if message.blank?
 
-    mcp_url = mcp_server_url
+    # No MCP plugin means no tools at all: chat still works, the model just
+    # answers from its own knowledge instead of from Redmine data.
+    mcp_url = mcp_installed? ? mcp_server_url : nil
 
     chat    = find_or_create_chat(params[:chat_id], message)
     # Greetings don't need prior context
@@ -53,7 +72,7 @@ class RedmineAgentController < ApplicationController
       end
 
       redmine_api_key = User.current.try(:api_key).presence || ''
-      if greeting_only?(message)
+      if greeting_only?(message) || mcp_url.blank?
         mcp_tools = session_id = mcp_instructions = nil
       else
         mcp_tools, session_id, mcp_instructions = fetch_mcp_tools(mcp_url, redmine_api_key)
@@ -124,6 +143,12 @@ class RedmineAgentController < ApplicationController
 
   # List the configured agents (from the DB) for the mobile sidebar.
   def agents
+    begin
+      default_agent
+    rescue => e
+      Rails.logger.warn "Failed to seed the default agent: #{e.message}"
+    end
+
     agents = AiAgent.active.order(:name).map do |a|
       { id: a.id, name: a.name, description: a.description }
     end
@@ -132,7 +157,7 @@ class RedmineAgentController < ApplicationController
 
   # List this user's past chats for the History panel.
   def history
-    render json: { chats: user_chats(User.current) }
+    render json: { chats: user_chats(User.current), errors: show_agent_menu? }
   end
 
   # Permanently delete a whole chat, scoped to the current user.
@@ -387,11 +412,12 @@ class RedmineAgentController < ApplicationController
     provider_tools = claude?(provider) ? convert_tools_for_claude(mcp[:tools]) : convert_tools_for_provider(mcp[:tools])
     write_tools    = available_write_tools(mcp[:tools])
 
+    system_prompt = system_instructions(mcp[:instructions], tools: mcp_url.present?)
+
     try_models(models) do |model|
       messages = if claude?(provider)
                    build_messages(message, include_system: false, history: history)
                  else
-                   system_prompt = system_instructions(mcp[:instructions])
                    build_messages(message, system_prompt: system_prompt, history: history)
                  end
 
@@ -408,7 +434,7 @@ class RedmineAgentController < ApplicationController
         current_tools = final_pass ? nil : provider_tools
 
         begin
-          response = call_provider_api(provider, model, settings, messages, current_tools, mcp[:instructions], iteration: iteration)
+          response = call_provider_api(provider, model, settings, messages, current_tools, system_prompt, iteration: iteration)
         rescue UnavailableToolError => e
           logger.warn(e.message)
           unavailable_tool = e.tool_name
@@ -505,7 +531,7 @@ class RedmineAgentController < ApplicationController
       # Resolve the final reply
       primary = stopped_on_error ? '' : extract_provider_text(provider, response)
       reply = resolve_reply(primary, intermediate_text) do
-        forced = call_provider_api(provider, model, settings, messages, nil, mcp[:instructions])
+        forced = call_provider_api(provider, model, settings, messages, nil, system_prompt)
         extract_provider_text(provider, forced)
       end
       # HITL: keep the approval marker only for a write tool that exists — see
@@ -515,7 +541,7 @@ class RedmineAgentController < ApplicationController
     end
   end
 
-  def call_provider_api(provider, model, settings, messages, tools, mcp_instructions = nil, iteration: 0)
+  def call_provider_api(provider, model, settings, messages, tools, system_prompt = nil, iteration: 0)
     if claude?(provider)
       api_key = settings['api_key'].to_s.strip
       raise 'Claude API key is not configured.' if api_key.blank?
@@ -526,7 +552,7 @@ class RedmineAgentController < ApplicationController
 
       system_blocks = [{
         type: 'text',
-        text: system_instructions(mcp_instructions),
+        text: system_prompt.presence || system_instructions,
         cache_control: { type: 'ephemeral' }
       }]
 
@@ -769,9 +795,9 @@ class RedmineAgentController < ApplicationController
     Setting.plugin_redmine_agent['instructions'].to_s.strip
   end
 
-  def system_instructions(mcp_instructions = nil)
-    prefix = mcp_instructions.present? ? "#{mcp_instructions}\n\n" : ''
-
+  # Date and user facts the model has no other way to know, shared by the
+  # tool-backed and the tool-free prompt.
+  def agent_context
     # Injected so the model knows the real "today" (it has no clock) and can
     # resolve relative dates like "yesterday"/"tomorrow" the user mentions.
     today = Date.current
@@ -786,6 +812,53 @@ class RedmineAgentController < ApplicationController
     # tool round-trip on get_user(id: "current") before it can answer anything.
     user = User.current
 
+    <<~CONTEXT
+      CONTEXT: CURRENT DATE & CURRENT USER
+      - Today is #{today.strftime('%A, %-d %B %Y')} (#{today.iso8601}). Yesterday was #{(today - 1).iso8601}, tomorrow is #{(today + 1).iso8601}.
+      - "This week" starts on #{start_of_week.strftime('%A')} and spans from #{start_of_week.iso8601} to #{end_of_week.iso8601} (based on Redmine's week start setting).
+      - Resolve "today", "current date", "now", "this week", "this month" and every other relative date from it. Never ask the date, and never guess it.
+      - You are talking to #{user.name} — login #{user.login}, numeric ID #{user.id}, administrator: #{user.admin? ? 'yes' : 'no'}.
+      - "current user", "logged user", "logged-in user", "me", "my" and "I" all mean that user. Never ask who they are, and never guess.
+    CONTEXT
+  end
+
+  # How the reply is rendered, which doesn't depend on the tools being there.
+  def reply_format
+    <<~FORMAT
+      FORMAT:
+      Your replies are rendered as rich markdown (tables, bullet lists, bold, links), so use markdown formatting.
+      - For action confirmations (create, update, delete): write a short confirmation sentence, then a bullet list with **Field:** Value for each key field. End with a brief follow-up offer (e.g. "Want to add more details?").
+      - When the user asks for only ONE field of many records (e.g. "get users name", "list the project names", "just the logins"): output a simple markdown bullet list ("- value") of only that field's values — one per line. Do not use a table and do not add other columns.
+      - For listing 3 or more records with multiple fields: use a markdown table with the most important columns. One row per line, with a header row and a |---| separator row.
+      - For a single record's details: use a bullet list with **Field:** Value format.
+      - For general questions: plain conversational text.
+      Use **bold** for field labels. Flatten nested objects (status.name → status, project.name → project). Omit verbose or rarely-needed fields. Keep replies concise.
+    FORMAT
+  end
+
+  # The prompt used when no tools were sent — the MCP plugin isn't installed, so
+  def tool_free_instructions
+    <<~PROMPT
+      You are a helpful assistant inside Redmine, talking to a logged-in Redmine user.
+
+      #{agent_context}
+      WHAT YOU CAN DO:
+      - You have no connection to this Redmine instance, so you cannot read, create, update or delete any record in it.
+      - Answer general questions — arithmetic, definitions, explanations, writing help, how Redmine works in general — directly from your own knowledge.
+      - If the user asks for data from this Redmine (their issues, projects, time entries, users, files, ...) or asks you to change something in it, say in one short sentence that you can't access this Redmine's data right now, then answer whatever part of the question you can from general knowledge.
+      - Never claim you looked something up, never claim you carried out an action, and never ask the user to approve one.
+      - If a request is ambiguous, ask exactly one short clarifying question.
+      - The chat is continuous: when the user replies with just the detail you asked for, merge it with the earlier request instead of treating it as a new one.
+
+      DATA RULES:
+      - Never fabricate Redmine data — no issue numbers, project names, users, hours or dates from this instance.
+      - Never mention APIs, HTTP, MCP, JSON, SQL, or internal implementation details.
+
+      #{reply_format}
+    PROMPT
+  end
+
+  def system_instructions(mcp_instructions = nil, tools: true)
     custom = custom_instructions
     suffix = custom.present? ? "\n#{<<~CUSTOM}" : ''
       ADDITIONAL INSTRUCTIONS:
@@ -795,6 +868,13 @@ class RedmineAgentController < ApplicationController
 
       #{custom}
     CUSTOM
+
+    # Nothing was sent that the model could call, so the tool rules and the
+    # approval block don't apply — only the administrator's instructions still
+    # ride along.
+    return "#{tool_free_instructions}#{suffix}" unless tools
+
+    prefix = mcp_instructions.present? ? "#{mcp_instructions}\n\n" : ''
 
     hitl_block =
       if hitl_enabled?
@@ -832,14 +912,7 @@ class RedmineAgentController < ApplicationController
     "#{prefix}#{<<~PROMPT}#{hitl_block}#{suffix}"
       You are a Redmine assistant. Use the available MCP tools to answer questions about Redmine data.
 
-      CONTEXT: CURRENT DATE & CURRENT USER
-      - Today is #{today.strftime('%A, %-d %B %Y')} (#{today.iso8601}). Yesterday was #{(today - 1).iso8601}, tomorrow is #{(today + 1).iso8601}.
-      - "This week" starts on #{start_of_week.strftime('%A')} and spans from #{start_of_week.iso8601} to #{end_of_week.iso8601} (based on Redmine's week start setting).
-      - Resolve "today", "current date", "now", "this week", "this month" and every other relative date from it. Never ask the date, and never guess it.
-      - You are talking to #{user.name} — login #{user.login}, numeric ID #{user.id}, administrator: #{user.admin? ? 'yes' : 'no'}.
-      - "current user", "logged user", "logged-in user", "me", "my" and "I" all mean that user. Never ask who they are, and never guess.
-      - Filter their time entries with `user_id="me"`.
-
+      #{agent_context}
       TOOL USAGE RULES:
       - Only call a tool when the user requests Redmine data or an action. Don't call tools for greetings or general chat.
       - Answer general questions (arithmetic, definitions, explanations, writing help) directly from your own knowledge, without calling a tool. The tool requirement applies only to Redmine data, so don't refuse a question just because it isn't about Redmine.
@@ -877,19 +950,12 @@ class RedmineAgentController < ApplicationController
 
       - Any total displayed alongside a table must be calculated from that table's rows only. Never reuse totals from previous responses or different filters, users, projects, or date ranges. Always recompute using the current dataset.
 
-      FORMAT:
-      Your replies are rendered as rich markdown (tables, bullet lists, bold, links), so use markdown formatting.
-      - For action confirmations (create, update, delete): write a short confirmation sentence, then a bullet list with **Field:** Value for each key field. End with a brief follow-up offer (e.g. "Want to add more details?").
-      - When the user asks for only ONE field of many records (e.g. "get users name", "list the project names", "just the logins"): output a simple markdown bullet list ("- value") of only that field's values — one per line. Do not use a table and do not add other columns.
-      - For listing 3 or more records with multiple fields: use a markdown table with the most important columns. One row per line, with a header row and a |---| separator row.
-      - For a single record's details: use a bullet list with **Field:** Value format.
-      - For general questions: plain conversational text.
-      Use **bold** for field labels. Flatten nested objects (status.name → status, project.name → project). Omit verbose or rarely-needed fields. Keep replies concise.
+      #{reply_format}
     PROMPT
   end
 
   def log_mcp_status(mcp_tools, mcp_url)
-    logger.info("Fetched 2{mcp_tools&.size.to_i} MCP tools.")
+    logger.info("Fetched #{mcp_tools&.size.to_i} MCP tools.")
     logger.warn("No MCP tools available — check MCP URL: #{mcp_url.inspect}") if mcp_tools.blank?
   end
 

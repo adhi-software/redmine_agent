@@ -1,3 +1,5 @@
+require_relative './lib/agent_hook'
+
 Rails.application.config.after_initialize do
   # ERPmine overrides render_main_menu but introduces a bug: it ignores the
   # controller.current_menu and hardcodes its own menu_name() logic.
@@ -24,7 +26,7 @@ Redmine::Plugin.register :redmine_agent do
   name 'Redmine Agent'
   author 'Adhi Software Pvt Ltd'
   description 'Redmine Agent'
-  version '1.0'
+  version '1.0.1'
   url ''
   author_url 'http://www.adhisoftware.co.in/'
   requires_redmine version_or_higher: '6.0.0'
@@ -36,7 +38,7 @@ Redmine::Plugin.register :redmine_agent do
     'instructions'   => "Never expose another user's information to non-admin users.\n" \
                         "Reject all delete requests by default.",
     # When enabled, create/update/delete tool calls require manual user approval.
-    'human_in_the_loop' => '0',
+    'human_in_the_loop' => '1',
   })
 
   # Top-bar entry

@@ -15,17 +15,22 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
-# Represents a configured AI agent (an entry in the agent list).
-class AiAgent < ActiveRecord::Base
-  has_many :ai_agent_chats, dependent: :destroy
-  has_many :ai_chat_messages, through: :ai_agent_chats
+class AgentHook < Redmine::Hook::ViewListener
+	include RedmineAgentHelper
 
-  # case_sensitive: false compares with LOWER() on every adapter, so the name is
-  # unique the same way on MySQL (case-insensitive collation) and on
-  # PostgreSQL / SQLite / SQL Server (case-sensitive by default).
-  validates :name, presence: true, uniqueness: { case_sensitive: false }
+	def get_other_settings(context={})
+		settings = context[:configs][:settings]
+		context[:configs][:agent_module] = true
+		settings['agent_human_in_the_loop'] = Setting.plugin_redmine_agent['human_in_the_loop'].to_s == '1'
 
-  scope :active, -> { where(active: true) }
-  # Match a name regardless of case on any database.
-  scope :named, ->(name) { where('LOWER(name) = ?', name.to_s.downcase) }
+		userlanguage = User.current.language
+		if userlanguage != 'en'
+			languageSet = context[:configs][:languageSet] || {}
+			path = "plugins/redmine_agent/config/locales/en.yml"
+			File.open(path).each do |line|
+				key, value = line.chomp.split(":")
+				languageSet[key.strip] = value.strip if value.present?
+			end
+		end
+	end
 end
