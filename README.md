@@ -20,14 +20,17 @@ The AI Agent plugin for Redmine adds a chat assistant that interacts with your R
 
 | **Redmine** | **Redmine Agent** |
 |-------------|-------------------|
-| 7.0.x | 1.0 |
+| 7.0.x | 1.0, 1.0.1 |
 
-## Release Notes for v1.0
+## Release Notes for v1.0.1
 
 - **Features**
   ```text
-  - AI chat agent integrated into Redmine
-  - Supports multiple LLM providers
+  - Added Rest Api
+  ```
+- **Bug fixes**
+  ```text
+   - Fixed agent to work without an MCP server.
   ```
   
 ## Customization
