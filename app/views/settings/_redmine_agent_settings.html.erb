@@ -59,6 +59,28 @@
 </p>
 
 <p>
+  <label for="settings_slack_bot_token"><strong><%= l(:label_agent_slack_bot_token) %></strong></label>
+  <%= password_field_tag 'settings[slack_bot_token]', settings['slack_bot_token'],
+        id: 'settings_slack_bot_token', autocomplete: 'off',
+        style: 'width:320px; max-width:100%; box-sizing:border-box;' %></br>
+  <%= l(:label_agent_slack_bot_token_hint) %>
+</p>
+
+<p>
+  <label for="settings_run_as_login"><strong><%= l(:label_agent_run_as_login) %></strong></label>
+  <%= text_field_tag 'settings[run_as_login]', settings['run_as_login'],
+        id: 'settings_run_as_login', style: 'width:200px; max-width:100%; box-sizing:border-box;' %></br>
+  <%= l(:label_agent_run_as_login_hint) %>
+</p>
+
+<p>
+  <label for="settings_base_url"><strong><%= l(:label_agent_base_url) %></strong></label>
+  <%= text_field_tag 'settings[base_url]', settings['base_url'],
+        id: 'settings_base_url', style: 'width:320px; max-width:100%; box-sizing:border-box;' %></br>
+  <%= l(:label_agent_base_url_hint) %>
+</p>
+
+<p>
   <label><strong><%= l(:label_redmine_agent_mcp_status) %></strong></label>
   <% if is_mcp_install %>
     <span class="mcp-status-ok"><%= sprite_icon('checked') %></span>

@@ -47,3 +47,52 @@ en:
   label_agent_action_cancelled: "Cancelled — the action was not carried out. Let me know if you'd like to change anything and try again."
   label_agent_no_reply: "Sorry, I could not complete that request. Please try rephrasing it."
   label_agent_tool_unavailable: "I can't do that here — the %{action} action isn't available."
+
+  # Custom agents
+  label_agent_add_agent: Add agent
+  label_agent_manage_agents: Manage agents
+  label_agent_agents_title: Agents
+  label_agent_no_agents: No agents yet
+  label_agent_new_agent: "+ New agent"
+  label_agent_edit_agent: Edit agent
+  label_agent_agent_name: Name
+  label_agent_agent_task: Task / instructions
+  label_agent_agent_task_hint: "What should this agent do? This becomes its instructions."
+  label_agent_agent_schedule: Run on a schedule
+  label_agent_schedule_frequency: Frequency
+  label_agent_schedule_none: Not scheduled
+  label_agent_schedule_daily: Daily
+  label_agent_schedule_weekdays: Weekdays
+  label_agent_schedule_weekly: Weekly
+  label_agent_schedule_monthly: Monthly
+  label_agent_schedule_time: Time
+  label_agent_schedule_weekday: Day of week
+  label_agent_schedule_day: Day of month
+  label_agent_schedule_timezone: Timezone
+  label_agent_notify: Notify by
+  label_agent_notify_slack: Slack
+  label_agent_notify_email: Email
+  label_agent_notify_teams: Teams
+  label_agent_notify_jira: Jira
+  label_agent_notify_coming_soon: "(coming soon)"
+  label_agent_slack_channel: Slack channel
+  label_agent_slack_channel_hint: "Leave blank to send each person a direct message instead."
+  label_agent_save: Save
+  label_agent_saving: "Saving..."
+  label_agent_save_failed: Could not save.
+  label_agent_delete_agent_confirm: "Delete this agent? Its chat history will be removed too."
+  label_agent_run_now: Run now
+  label_agent_running: "Running..."
+  label_agent_never_run: Never run
+  label_agent_slack_bot_token: Slack bot token
+  label_agent_slack_bot_token_hint: "Note: Used to DM agent notifications on Slack."
+  label_agent_run_as_login: Run scheduled agents as
+  label_agent_run_as_login_hint: "Note: Login of the Redmine user whose API key runs scheduled agent chats."
+  label_agent_base_url: Base URL
+  label_agent_base_url_hint: "Note: Loopback URL the scheduler calls, e.g. http://127.0.0.1:3000. Leave blank to use the default."
+  error_agent_name_blank: Please enter a name.
+  error_agent_name_taken: An agent with this name already exists.
+  error_agent_invalid_schedule: Please enter a valid schedule time.
+  error_agent_unknown: Unknown agent.
+  error_agent_invalid_channel: "Enter a valid Slack channel, for example #reminders"
+  error_agent_cannot_delete_default: "Query Agent can't be deleted."

@@ -447,4 +447,469 @@ document.addEventListener('DOMContentLoaded', function () {
   });
 
   updateSendButton();
+
+  // ── Agent management (admin only) ──
+  var customAgentsUrl = page.getAttribute('data-custom-agents-url');
+  if (!customAgentsUrl) return;
+
+  var manageBtn = document.getElementById('agent-manage-agents');
+  var agentsPanel = document.getElementById('agent-agents-panel');
+  var agentsList = document.getElementById('agent-agents-list');
+  var agentsClose = document.getElementById('agent-agents-close');
+  var newAgentBtn = document.getElementById('agent-new-agent-btn');
+  var addAgentBtn = document.getElementById('agent-add-agent');
+
+  var ai18n = {
+    agentsTitle: page.getAttribute('data-i18n-agents-title'),
+    noAgents: page.getAttribute('data-i18n-no-agents'),
+    editAgent: page.getAttribute('data-i18n-edit-agent'),
+    addAgent: page.getAttribute('data-i18n-add-agent'),
+    agentName: page.getAttribute('data-i18n-agent-name'),
+    agentTask: page.getAttribute('data-i18n-agent-task'),
+    agentTaskHint: page.getAttribute('data-i18n-agent-task-hint'),
+    agentSchedule: page.getAttribute('data-i18n-agent-schedule'),
+    freqLabel: page.getAttribute('data-i18n-schedule-frequency'),
+    freqDaily: page.getAttribute('data-i18n-schedule-daily'),
+    freqWeekdays: page.getAttribute('data-i18n-schedule-weekdays'),
+    freqWeekly: page.getAttribute('data-i18n-schedule-weekly'),
+    freqMonthly: page.getAttribute('data-i18n-schedule-monthly'),
+    timeLabel: page.getAttribute('data-i18n-schedule-time'),
+    weekdayLabel: page.getAttribute('data-i18n-schedule-weekday'),
+    dayLabel: page.getAttribute('data-i18n-schedule-day'),
+    notify: page.getAttribute('data-i18n-notify'),
+    notifySlack: page.getAttribute('data-i18n-notify-slack'),
+    notifyEmail: page.getAttribute('data-i18n-notify-email'),
+    notifyTeams: page.getAttribute('data-i18n-notify-teams'),
+    notifyJira: page.getAttribute('data-i18n-notify-jira'),
+    comingSoon: page.getAttribute('data-i18n-notify-coming-soon'),
+    slackChannel: page.getAttribute('data-i18n-slack-channel'),
+    slackChannelHint: page.getAttribute('data-i18n-slack-channel-hint'),
+    save: page.getAttribute('data-i18n-save'),
+    saving: page.getAttribute('data-i18n-saving'),
+    saveFailed: page.getAttribute('data-i18n-save-failed'),
+    cancel: page.getAttribute('data-i18n-cancel'),
+    deleteAgentConfirm: page.getAttribute('data-i18n-delete-agent-confirm'),
+    runNow: page.getAttribute('data-i18n-run-now'),
+    running: page.getAttribute('data-i18n-running'),
+    neverRun: page.getAttribute('data-i18n-never-run')
+  };
+
+  function jsonHeaders() {
+    return { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken ? csrfToken.content : '' };
+  }
+
+  function hideAgentsPanel() {
+    if (agentsPanel) agentsPanel.hidden = true;
+  }
+
+  if (manageBtn) {
+    manageBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (agentsPanel.hidden) {
+        loadAgentsList();
+        agentsPanel.hidden = false;
+      } else {
+        hideAgentsPanel();
+      }
+    });
+  }
+  if (agentsClose) agentsClose.addEventListener('click', hideAgentsPanel);
+
+  document.addEventListener('click', function (e) {
+    if (!agentsPanel || agentsPanel.hidden) return;
+    if (agentsPanel.contains(e.target) || (manageBtn && manageBtn.contains(e.target))) return;
+    hideAgentsPanel();
+  });
+
+  function loadAgentsList() {
+    agentsList.innerHTML = '';
+    agentsList.appendChild(emptyRow(i18n.loading));
+    fetch(customAgentsUrl, { headers: { 'Accept': 'application/json' } })
+      .then(function (res) { return res.json(); })
+      .then(function (data) { renderAgentsList(data.agents || []); })
+      .catch(function () {
+        agentsList.innerHTML = '';
+        agentsList.appendChild(emptyRow(i18n.historyError));
+      });
+  }
+
+  function renderAgentsList(agents) {
+    agentsList.innerHTML = '';
+    if (!agents.length) {
+      agentsList.appendChild(emptyRow(ai18n.noAgents));
+      return;
+    }
+    agents.forEach(function (agent) { agentsList.appendChild(buildAgentRow(agent)); });
+  }
+
+  function buildAgentRow(agent) {
+    var row = document.createElement('div');
+    row.className = 'agent-history-item agent-agent-item';
+
+    var body = document.createElement('div');
+    body.className = 'agent-history-item-body';
+
+    var name = document.createElement('div');
+    name.className = 'agent-history-item-request';
+    name.textContent = agent.name + (agent.enabled === false ? ' (disabled)' : '');
+
+    var meta = document.createElement('div');
+    meta.className = 'agent-history-item-time';
+    var bits = [];
+    if (agent.cron) bits.push(agent.next_run ? new Date(agent.next_run).toLocaleString() : ai18n.runNow);
+    var notifyBits = [];
+    if (agent.notify && agent.notify.slack) notifyBits.push(ai18n.notifySlack);
+    if (agent.notify && agent.notify.email) notifyBits.push(ai18n.notifyEmail);
+    if (notifyBits.length) bits.push(notifyBits.join(', '));
+    meta.textContent = bits.join(' · ');
+
+    body.appendChild(name);
+    body.appendChild(meta);
+    body.addEventListener('click', function () { openAgentForm(agent); });
+
+    var actions = document.createElement('div');
+    actions.className = 'agent-agent-actions';
+
+    var editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'agent-agent-action-btn';
+    editBtn.textContent = ai18n.editAgent;
+    editBtn.addEventListener('click', function (e) { e.stopPropagation(); openAgentForm(agent); });
+    actions.appendChild(editBtn);
+
+    if (agent.cron) {
+      var runBtn = document.createElement('button');
+      runBtn.type = 'button';
+      runBtn.className = 'agent-agent-action-btn';
+      runBtn.textContent = ai18n.runNow;
+      runBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        runBtn.disabled = true;
+        runBtn.textContent = ai18n.running;
+        fetch(customAgentsUrl + '/' + agent.key + '/run', { method: 'POST', headers: jsonHeaders() })
+          .then(function (r) { return r.json(); })
+          .then(function () { runBtn.disabled = false; runBtn.textContent = ai18n.runNow; })
+          .catch(function () { runBtn.disabled = false; runBtn.textContent = ai18n.runNow; });
+      });
+      actions.appendChild(runBtn);
+    }
+
+    if (agent.deletable) {
+      var delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'agent-history-item-delete';
+      delBtn.title = i18n.deleteTitle;
+      delBtn.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>';
+      delBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        if (!window.confirm(ai18n.deleteAgentConfirm)) return;
+        fetch(customAgentsUrl + '/' + agent.key, { method: 'DELETE', headers: jsonHeaders() })
+          .then(function (r) { return r.json(); })
+          .then(function () {
+            row.remove();
+            removeAgentMenuItem(agent.key);
+            if (!agentsList.children.length) agentsList.appendChild(emptyRow(ai18n.noAgents));
+          });
+      });
+      actions.appendChild(delBtn);
+    }
+
+    row.appendChild(body);
+    row.appendChild(actions);
+    return row;
+  }
+
+  function agentMenuList() {
+    var link = document.querySelector('#main-menu a[href*="/redmine_agent"]');
+    return link ? link.closest('ul') : null;
+  }
+
+  function applyAgentMenuEntry(menu) {
+    if (!menu) return;
+    var ul = agentMenuList();
+    if (!ul) return;
+    var existing = ul.querySelector('a[href="' + menu.url + '"]');
+    if (existing) { existing.textContent = menu.name; return; }
+    var li = document.createElement('li');
+    var a = document.createElement('a');
+    a.href = menu.url;
+    a.className = 'ai-agent-' + menu.key;
+    a.textContent = menu.name;
+    li.appendChild(a);
+    ul.appendChild(li);
+  }
+
+  function removeAgentMenuItem(key) {
+    var ul = agentMenuList();
+    if (!ul) return;
+    var a = ul.querySelector('a[href*="agent_key=' + key + '"]');
+    if (a) {
+      var li = a.closest('li');
+      if (li) li.remove();
+    }
+  }
+
+  // ── Create / edit form (modal) ──
+  function labeled(label, field) {
+    var wrap = document.createElement('div');
+    wrap.className = 'agent-form-field';
+    wrap.appendChild(label);
+    wrap.appendChild(field);
+    return wrap;
+  }
+
+  function textLabel(text) {
+    var l = document.createElement('label');
+    l.textContent = text;
+    return l;
+  }
+
+  function notifyCheckbox(labelText, checked, disabled) {
+    var wrap = document.createElement('label');
+    wrap.className = 'agent-notify-check' + (disabled ? ' disabled' : '');
+    var input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = !!checked;
+    input.disabled = !!disabled;
+    wrap.appendChild(input);
+    wrap.appendChild(document.createTextNode(' ' + labelText));
+    return { wrap: wrap, input: input };
+  }
+
+  function parseCronForForm(cron) {
+    if (!cron) return { frequency: 'none', time: '09:00', weekday: '0', day: '1', timezone: 'Asia/Kolkata' };
+    var parts = cron.trim().split(/\s+/);
+    var min = parts[0], hour = parts[1], dom = parts[2], dow = parts[4], tz = parts[5] || 'Asia/Kolkata';
+    var time = (hour.length < 2 ? '0' + hour : hour) + ':' + (min.length < 2 ? '0' + min : min);
+    var frequency = 'daily', weekday = '0', day = '1';
+    if (dow === '1-5') { frequency = 'weekdays'; }
+    else if (dow !== '*') { frequency = 'weekly'; weekday = dow; }
+    else if (dom !== '*') { frequency = 'monthly'; day = dom; }
+    return { frequency: frequency, time: time, weekday: weekday, day: day, timezone: tz };
+  }
+
+  function ensureAgentModal() {
+    var modal = document.getElementById('agent-form-modal');
+    if (modal) return modal;
+    modal = document.createElement('div');
+    modal.id = 'agent-form-modal';
+    modal.className = 'agent-modal-backdrop';
+    modal.hidden = true;
+    document.body.appendChild(modal);
+    modal.addEventListener('click', function (e) { if (e.target === modal) closeAgentForm(); });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && !modal.hidden) closeAgentForm();
+    });
+    return modal;
+  }
+
+  function closeAgentForm() {
+    var modal = document.getElementById('agent-form-modal');
+    if (modal) modal.hidden = true;
+  }
+
+  function openAgentForm(agent) {
+    var modal = ensureAgentModal();
+    var isEdit = !!(agent && agent.key);
+    var initial = agent || {};
+    var sched = parseCronForForm(initial.cron);
+
+    modal.innerHTML = '';
+    var box = document.createElement('div');
+    box.className = 'agent-modal';
+
+    var title = document.createElement('h3');
+    title.textContent = isEdit ? ai18n.editAgent : ai18n.addAgent;
+    box.appendChild(title);
+
+    var form = document.createElement('div');
+    form.className = 'agent-form';
+
+    var nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.value = initial.name || '';
+    form.appendChild(labeled(textLabel(ai18n.agentName), nameInput));
+
+    var taskInput = document.createElement('textarea');
+    taskInput.rows = 6;
+    taskInput.value = initial.task || '';
+    form.appendChild(labeled(textLabel(ai18n.agentTask), taskInput));
+
+    var taskHint = document.createElement('p');
+    taskHint.className = 'agent-form-hint';
+    taskHint.textContent = ai18n.agentTaskHint;
+    form.appendChild(taskHint);
+
+    var schedWrap = document.createElement('div');
+    schedWrap.className = 'agent-form-field agent-sched-toggle';
+    var schedCheck = document.createElement('input');
+    schedCheck.type = 'checkbox';
+    schedCheck.id = 'agent-form-sched-on';
+    schedCheck.checked = sched.frequency !== 'none';
+    var schedCheckLabel = document.createElement('label');
+    schedCheckLabel.htmlFor = 'agent-form-sched-on';
+    schedCheckLabel.textContent = ai18n.agentSchedule;
+    schedWrap.appendChild(schedCheck);
+    schedWrap.appendChild(schedCheckLabel);
+    form.appendChild(schedWrap);
+
+    var schedFields = document.createElement('div');
+    schedFields.className = 'agent-sched-fields';
+
+    var freqSelect = document.createElement('select');
+    freqSelect.className = 'multi-row';
+    [['daily', ai18n.freqDaily], ['weekdays', ai18n.freqWeekdays], ['weekly', ai18n.freqWeekly], ['monthly', ai18n.freqMonthly]]
+      .forEach(function (pair) {
+        var opt = document.createElement('option');
+        opt.value = pair[0];
+        opt.textContent = pair[1];
+        if (sched.frequency === pair[0]) opt.selected = true;
+        freqSelect.appendChild(opt);
+      });
+    schedFields.appendChild(labeled(textLabel(ai18n.freqLabel), freqSelect));
+
+    var timeInput = document.createElement('input');
+    timeInput.type = 'time';
+    timeInput.value = sched.time;
+    schedFields.appendChild(labeled(textLabel(ai18n.timeLabel), timeInput));
+
+    var weekdaySelect = document.createElement('select');
+    weekdaySelect.className = 'multi-row';
+    ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].forEach(function (d, i) {
+      var opt = document.createElement('option');
+      opt.value = i;
+      opt.textContent = d;
+      if (String(sched.weekday) === String(i)) opt.selected = true;
+      weekdaySelect.appendChild(opt);
+    });
+    var weekdayRow = labeled(textLabel(ai18n.weekdayLabel), weekdaySelect);
+    schedFields.appendChild(weekdayRow);
+
+    var dayInput = document.createElement('input');
+    dayInput.type = 'number';
+    dayInput.min = 1;
+    dayInput.max = 31;
+    dayInput.value = sched.day;
+    var dayRow = labeled(textLabel(ai18n.dayLabel), dayInput);
+    schedFields.appendChild(dayRow);
+
+    form.appendChild(schedFields);
+
+    function syncSchedVisibility() {
+      schedFields.hidden = !schedCheck.checked;
+      weekdayRow.hidden = freqSelect.value !== 'weekly';
+      dayRow.hidden = freqSelect.value !== 'monthly';
+    }
+    schedCheck.addEventListener('change', syncSchedVisibility);
+    freqSelect.addEventListener('change', syncSchedVisibility);
+    syncSchedVisibility();
+
+    var notifyLabel = document.createElement('div');
+    notifyLabel.className = 'agent-form-section-label';
+    notifyLabel.textContent = ai18n.notify;
+    form.appendChild(notifyLabel);
+
+    var notifyRow = document.createElement('div');
+    notifyRow.className = 'agent-notify-row';
+    var slackCheck = notifyCheckbox(ai18n.notifySlack, initial.notify && initial.notify.slack, false);
+    var emailCheck = notifyCheckbox(ai18n.notifyEmail, initial.notify && initial.notify.email, false);
+    var teamsCheck = notifyCheckbox(ai18n.notifyTeams + ' ' + ai18n.comingSoon, false, true);
+    var jiraCheck = notifyCheckbox(ai18n.notifyJira + ' ' + ai18n.comingSoon, false, true);
+    [slackCheck, emailCheck, teamsCheck, jiraCheck].forEach(function (c) { notifyRow.appendChild(c.wrap); });
+    form.appendChild(notifyRow);
+
+    // Channel is asked for only once Slack is ticked; blank means DM each
+    // person instead of posting to a channel.
+    var channelInput = document.createElement('input');
+    channelInput.type = 'text';
+    channelInput.placeholder = '#reminders';
+    channelInput.value = initial.slack_channel || '';
+    var channelRow = labeled(textLabel(ai18n.slackChannel), channelInput);
+    channelRow.classList.add('agent-slack-channel');
+
+    var channelHint = document.createElement('p');
+    channelHint.className = 'agent-form-hint';
+    channelHint.textContent = ai18n.slackChannelHint;
+    channelRow.appendChild(channelHint);
+    form.appendChild(channelRow);
+
+    function syncChannelVisibility() {
+      channelRow.hidden = !slackCheck.input.checked;
+    }
+    slackCheck.input.addEventListener('change', syncChannelVisibility);
+    syncChannelVisibility();
+
+    box.appendChild(form);
+
+    var errorMsg = document.createElement('div');
+    errorMsg.className = 'agent-form-error';
+    box.appendChild(errorMsg);
+
+    var actions = document.createElement('div');
+    actions.className = 'agent-form-actions';
+
+    var cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = ai18n.cancel;
+    cancelBtn.addEventListener('click', closeAgentForm);
+
+    var saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'primary';
+    saveBtn.textContent = ai18n.save;
+    saveBtn.addEventListener('click', function () {
+      var name = nameInput.value.trim();
+      var task = taskInput.value.trim();
+      errorMsg.textContent = '';
+      if (!name || !task) { errorMsg.textContent = ai18n.saveFailed; return; }
+      if (schedCheck.checked && !timeInput.value) { errorMsg.textContent = ai18n.saveFailed; return; }
+
+      var payload = {
+        name: name,
+        task: task,
+        notify: { slack: slackCheck.input.checked, email: emailCheck.input.checked },
+        slack_channel: slackCheck.input.checked ? channelInput.value.trim() : ''
+      };
+      if (schedCheck.checked) {
+        payload.frequency = freqSelect.value;
+        payload.time = timeInput.value;
+        payload.weekday = weekdaySelect.value;
+        payload.day = dayInput.value;
+      } else {
+        payload.frequency = 'none';
+      }
+
+      saveBtn.disabled = true;
+      errorMsg.textContent = ai18n.saving;
+      var url = isEdit ? (customAgentsUrl + '/' + initial.key) : customAgentsUrl;
+      var method = isEdit ? 'PATCH' : 'POST';
+      fetch(url, { method: method, headers: jsonHeaders(), body: JSON.stringify(payload) })
+        .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+        .then(function (res) {
+          saveBtn.disabled = false;
+          if (!res.ok || res.data.error) {
+            errorMsg.textContent = (res.data && res.data.error) || ai18n.saveFailed;
+            return;
+          }
+          errorMsg.textContent = '';
+          closeAgentForm();
+          applyAgentMenuEntry(res.data.menu);
+          if (agentsPanel && !agentsPanel.hidden) loadAgentsList();
+        })
+        .catch(function () {
+          saveBtn.disabled = false;
+          errorMsg.textContent = ai18n.saveFailed;
+        });
+    });
+
+    actions.appendChild(cancelBtn);
+    actions.appendChild(saveBtn);
+    box.appendChild(actions);
+
+    modal.appendChild(box);
+    modal.hidden = false;
+  }
+
+  if (newAgentBtn) newAgentBtn.addEventListener('click', function () { openAgentForm(null); });
+  if (addAgentBtn) addAgentBtn.addEventListener('click', function () { openAgentForm(null); });
 });

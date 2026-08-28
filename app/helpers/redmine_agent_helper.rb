@@ -26,10 +26,15 @@ module RedmineAgentHelper
     text = text.to_s
     text = text.encode(Encoding::UTF_8) unless text.encoding == Encoding::UTF_8
 
-    html = Commonmarker.to_html(text, options: {
-      render:    { unsafe: false, hardbreaks: false },
-      extension: { table: true, autolink: true, strikethrough: true, tagfilter: true }
-    })
+    # Commonmarker's default Rust syntax highlighter (syntect) segfaults the
+    # whole process on this platform whenever a reply contains a fenced code
+    # block. Disabling it loses nothing: Sanitize strips highlight markup anyway.
+    html = Commonmarker.to_html(text,
+      options: {
+        render:    { unsafe: false, hardbreaks: false },
+        extension: { table: true, autolink: true, strikethrough: true, tagfilter: true }
+      },
+      plugins: { syntax_highlighter: nil })
     Sanitize.fragment(html,
       elements:       ALLOWED_HTML_TAGS,
       attributes:     ALLOWED_HTML_ATTRS,
@@ -44,18 +49,37 @@ module RedmineAgentHelper
        .gsub(/\|\s*\|/, "|\n|")     # table rows run together onto one line
   end
 
+  NOTIFY_BLOCK_RE = /```(?:json)?\s*(\{.*?\})\s*```/m
+
+  # Lifts the agent's machine-readable notify block out of the reply, so it is
+  # delivered but never shown in the chat. Returns [visible text, payload].
+  def extract_notify_block(raw)
+    payload = nil
+    text = raw.to_s.gsub(NOTIFY_BLOCK_RE) do
+      parsed = JSON.parse(Regexp.last_match(1)) rescue nil
+      next Regexp.last_match(0) unless parsed.is_a?(Hash) && parsed['agent_notify_v1']
+
+      payload = parsed
+      ''
+    end
+    [text, payload]
+  end
+
   # Convert the model's markdown reply into sanitized HTML for the web, plus
   # normalized markdown for clients that render it themselves (the mobile app).
   def parse_structured_reply(raw)
-    cleaned = normalize_markdown(raw)
+    text, notify = extract_notify_block(raw)
+    cleaned = normalize_markdown(text)
 
-    { reply: raw.strip, type: 'html', html: render_markdown(cleaned), markdown: cleaned }
+    { reply: text.strip, type: 'html', html: render_markdown(cleaned),
+      markdown: cleaned, notify: notify }
   end
 
-  def user_chats(user)
+  def user_chats(user, ai_agent = nil)
     chats = AiAgentChat.for_user(user)
                        .includes(:ai_chat_messages)
                        .limit(500)
+    chats = chats.for_agent(ai_agent) if ai_agent
 
     result = chats.filter_map do |chat|
       rows = chat.ai_chat_messages.sort_by { |m| [m.created_at, m.id] }
@@ -77,12 +101,15 @@ module RedmineAgentHelper
   end
 
   # Find the current user's chat by id, or start a new one. The
-  # first message becomes the chat's subject.
-  def find_or_create_chat(chat_id, message)
+  # first message becomes the chat's subject. Scoping the lookup by agent too
+  # means a chat_id from another agent can never be resumed under this one —
+  # it just starts a fresh chat here instead.
+  def find_or_create_chat(chat_id, message, ai_agent)
     cid = chat_id.to_s.presence
-    chat = (cid && cid.match?(/\A\d+\z/)) && AiAgentChat.for_user(User.current).find_by(id: cid)
+    chat = (cid && cid.match?(/\A\d+\z/)) &&
+           AiAgentChat.for_user(User.current).for_agent(ai_agent).find_by(id: cid)
     chat || AiAgentChat.create!(
-      ai_agent: default_agent,
+      ai_agent: ai_agent,
       user:     User.current,
       subject:  message.to_s.truncate(255)
     )
@@ -99,19 +126,6 @@ module RedmineAgentHelper
   rescue => e
     Rails.logger.warn "Failed to save agent history: #{e.message}"
     nil
-  end
-
-  # Named from the menu caption, forced to :en so the row is looked up under one
-  # stable name whatever language the user browses in. Looked up
-  # case-insensitively so the row is found whatever the database's collation.
-  # The retry covers the unique-index race between the lookup and the insert
-  # (two concurrent first requests).
-  def default_agent
-    name = I18n.t(:label_agent_query, locale: :en)
-    AiAgent.named(name).first ||
-      AiAgent.create!(name: name, description: 'Default Redmine chat agent')
-  rescue ActiveRecord::RecordNotUnique
-    AiAgent.named(name).first
   end
 
   def mcp_server_url

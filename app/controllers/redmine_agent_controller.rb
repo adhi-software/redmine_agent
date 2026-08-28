@@ -21,12 +21,17 @@ require 'uri'
 require 'json'
 require 'commonmarker'
 require 'sanitize'
+require 'fugit'
 
 class RedmineAgentController < ApplicationController
   include RedmineAgentHelper
 
   before_action :require_login
-  before_action :require_admin, only: [:test_model]
+  before_action :require_admin, only: [
+    :test_model, :custom_agents, :create_agent, :update_agent, :destroy_agent, :run_agent
+  ]
+  before_action :set_agent, only: [:index, :chat_request, :history, :clear]
+  before_action :sync_agent_menu
 
   accept_api_auth :index, :agents, :chat_request, :history, :clear
 
@@ -36,17 +41,22 @@ class RedmineAgentController < ApplicationController
     :agent_menu
   end
 
+  def current_menu_item
+    @current_menu_item ||= @agent ? :"ai_agent_#{@agent['key']}" : :ai_agent_query
+  end
+
   # Max sequential tool-call round-trips per user message.
   MAX_TOOL_ITERATIONS = 10
 
   def index
-    @chat_url    = url_for(controller: '/redmine_agent', action: 'chat_request')
-    @history_url = url_for(controller: '/redmine_agent', action: 'history')
-    @clear_url   = url_for(controller: '/redmine_agent', action: 'clear')
+    @chat_url    = url_for(controller: '/redmine_agent', action: 'chat_request', agent_key: agent_key_param)
+    @history_url = url_for(controller: '/redmine_agent', action: 'history', agent_key: agent_key_param)
+    @clear_url   = url_for(controller: '/redmine_agent', action: 'clear', agent_key: agent_key_param)
 
-    @greeting    = l(:label_redmine_agent_greeting, default: 'Hi! How can I help you today?')
+    @greeting     = l(:label_redmine_agent_greeting, default: 'Hi! How can I help you today?')
+    @agent_title  = @agent['name'].presence || l(:label_redmine_agent)
 
-    @initial_chat = user_chats(User.current).first
+    @initial_chat = user_chats(User.current, ai_agent_record).first
   end
 
   def chat_request
@@ -57,7 +67,10 @@ class RedmineAgentController < ApplicationController
     # answers from its own knowledge instead of from Redmine data.
     mcp_url = mcp_installed? ? mcp_server_url : nil
 
-    chat    = find_or_create_chat(params[:chat_id], message)
+    @agent_task = @agent['task'].presence
+    @agent_name = @agent['name']
+
+    chat    = find_or_create_chat(params[:chat_id], message, ai_agent_record)
     # Greetings don't need prior context
     history = greeting_only?(message) ? [] : chat_history(chat)
     provider = nil
@@ -141,37 +154,216 @@ class RedmineAgentController < ApplicationController
     render json: { success: false, message: e.message.presence || l(:label_redmine_agent_test_fail) }
   end
 
-  # List the configured agents (from the DB) for the mobile sidebar.
+  # List the configured AiAgent rows (from the DB) for the mobile sidebar.
   def agents
-    begin
-      default_agent
-    rescue => e
-      Rails.logger.warn "Failed to seed the default agent: #{e.message}"
-    end
-
     agents = AiAgent.active.order(:name).map do |a|
       { id: a.id, name: a.name, description: a.description }
     end
     render json: { agents: agents }
   end
 
-  # List this user's past chats for the History panel.
+  # List this user's past chats for the History panel, scoped to the agent
+  # on screen.
   def history
-    render json: { chats: user_chats(User.current), errors: show_agent_menu? }
+    render json: { chats: user_chats(User.current, ai_agent_record), errors: show_agent_menu? }
   end
 
-  # Permanently delete a whole chat, scoped to the current user.
+  # Permanently delete a whole chat, scoped to the current user and agent.
   def clear
     chat_id = params[:chat_id].to_s
     if chat_id.present? && chat_id.match?(/\A\d+\z/)
       AiAgentChat.for_user(User.current)
+                 .for_agent(ai_agent_record)
                  .where(id: chat_id)
                  .destroy_all
     end
     render json: { success: true }
   end
 
+  # List the manageable agents for the admin-only Agents panel. The default
+  # Query Agent is left out — it has no task or schedule and can't be deleted,
+  # so there is nothing to manage. It still appears in the sidebar.
+  def custom_agents
+    list = RedmineAgent::CustomAgents.all
+                                     .reject { |a| a['key'] == RedmineAgent::CustomAgents::QUERY_AGENT_KEY }
+                                     .map { |a| present_agent(a) }
+    render json: { agents: list }
+  end
+
+  # Creates an agent from the "+" popup. A schedule is just an optional cron
+  # on the agent itself — no separate schedule record.
+  def create_agent
+    name = params[:name].to_s.strip
+    task = params[:task].to_s.strip
+
+    return render json: { error: l(:error_agent_name_blank) }, status: :unprocessable_entity if name.blank?
+    return render json: { error: l(:error_agent_name_taken) }, status: :unprocessable_entity if RedmineAgent::CustomAgents.name_taken?(name)
+
+    cron = nil
+    if params[:frequency].to_s.present? && params[:frequency].to_s != 'none'
+      cron = build_agent_cron(params)
+      return render json: { error: l(:error_agent_invalid_schedule) }, status: :unprocessable_entity unless cron
+    end
+
+    channel = slack_channel_param
+    return render json: { error: l(:error_agent_invalid_channel) }, status: :unprocessable_entity if channel == :invalid
+
+    agent = RedmineAgent::CustomAgents.create(
+      'name'          => name,
+      'task'          => task,
+      'cron'          => cron,
+      'notify'        => notify_params,
+      'slack_channel' => channel,
+      'created_by'    => User.current.id
+    )
+    RedmineAgent::CustomAgents.ai_agent_record(agent)
+    RedmineAgent::CustomAgents.sync_menu!
+
+    render json: { agent: present_agent(agent), menu: menu_entry(agent) }
+  end
+
+  def update_agent
+    agent = RedmineAgent::CustomAgents.find(params[:key].to_s)
+    return render json: { error: l(:error_agent_unknown) }, status: :unprocessable_entity unless agent
+
+    attrs = {}
+    if params[:name].present?
+      name = params[:name].to_s.strip
+      return render json: { error: l(:error_agent_name_taken) }, status: :unprocessable_entity if RedmineAgent::CustomAgents.name_taken?(name, except_key: agent['key'])
+      attrs['name'] = name
+    end
+    attrs['task']    = params[:task].to_s.strip if params.key?(:task)
+    attrs['notify']  = notify_params if params.key?(:notify)
+    attrs['enabled'] = params[:enabled].to_s == 'true' if params.key?(:enabled)
+
+    if params.key?(:slack_channel)
+      channel = slack_channel_param
+      return render json: { error: l(:error_agent_invalid_channel) }, status: :unprocessable_entity if channel == :invalid
+      attrs['slack_channel'] = channel
+    end
+
+    if params[:frequency].present?
+      attrs['cron'] = params[:frequency].to_s == 'none' ? nil : build_agent_cron(params, agent['cron'])
+      return render json: { error: l(:error_agent_invalid_schedule) }, status: :unprocessable_entity if params[:frequency].to_s != 'none' && attrs['cron'].nil?
+    end
+
+    updated = RedmineAgent::CustomAgents.update(agent['key'], attrs)
+    RedmineAgent::CustomAgents.sync_menu!
+    render json: { agent: present_agent(updated), menu: menu_entry(updated) }
+  end
+
+  def destroy_agent
+    key = params[:key].to_s
+    return render json: { error: l(:error_agent_cannot_delete_default) }, status: :unprocessable_entity if key == RedmineAgent::CustomAgents::QUERY_AGENT_KEY
+
+    agent = RedmineAgent::CustomAgents.find(key)
+    return render json: { error: l(:error_agent_unknown) }, status: :unprocessable_entity unless agent
+
+    if params[:keep_history].to_s != 'true' && agent['ai_agent_id'].present?
+      AiAgent.find_by(id: agent['ai_agent_id'])&.destroy
+    end
+    RedmineAgent::CustomAgents.delete(key)
+    RedmineAgent::CustomAgents.sync_menu!
+    render json: { success: true }
+  end
+
+  def run_agent
+    agent = RedmineAgent::CustomAgents.find(params[:key].to_s)
+    return render json: { error: l(:error_agent_unknown) }, status: :unprocessable_entity unless agent
+
+    render json: { run: RedmineAgent::Runner.run(agent) }
+  end
+
   private
+
+  def set_agent
+    key = params[:agent_key].to_s.presence || RedmineAgent::CustomAgents::QUERY_AGENT_KEY
+    @agent = RedmineAgent::CustomAgents.find(key)
+    render_404 unless @agent
+  end
+
+  def sync_agent_menu
+    RedmineAgent::CustomAgents.sync_menu!
+  end
+
+  def agent_key_param
+    @agent && @agent['key'] != RedmineAgent::CustomAgents::QUERY_AGENT_KEY ? @agent['key'] : nil
+  end
+
+  # The AiAgent DB row this request's agent chat history is scoped to,
+  # memoized so a single request never looks it up twice.
+  def ai_agent_record
+    @ai_agent_record ||= RedmineAgent::CustomAgents.ai_agent_record(@agent)
+  end
+
+  def notify_params
+    n = params[:notify] || {}
+    {
+      'slack' => n[:slack].to_s == 'true',
+      'email' => n[:email].to_s == 'true',
+      'teams' => false,
+      'jira'  => false
+    }
+  end
+
+  # Slack channel names are lowercase, up to 80 chars, and allow - _ . only.
+  # Returns nil for blank (meaning: DM each recipient) or :invalid to reject.
+  SLACK_CHANNEL_RE = /\A#[a-z0-9._-]{1,80}\z/
+
+  def slack_channel_param
+    raw = params[:slack_channel].to_s.strip
+    return nil if raw.blank?
+
+    channel = raw.start_with?('#') ? raw : "##{raw}"
+    SLACK_CHANNEL_RE.match?(channel.downcase) ? channel.downcase : :invalid
+  end
+
+  def present_agent(agent)
+    {
+      key: agent['key'], name: agent['name'], task: agent['task'], cron: agent['cron'],
+      notify: agent['notify'], slack_channel: agent['slack_channel'],
+      enabled: agent['enabled'] != false,
+      deletable: agent['key'] != RedmineAgent::CustomAgents::QUERY_AGENT_KEY,
+      next_run: (agent['cron'].present? && (c = Fugit::Cron.parse(agent['cron'])) && c.next_time&.to_t&.iso8601),
+      last_run: RedmineAgent::CustomAgents.last_run(agent['key'])
+    }
+  end
+
+  def menu_entry(agent)
+    { key: agent['key'], name: agent['name'],
+      url: url_for(controller: '/redmine_agent', action: 'index', agent_key: agent['key']) }
+  end
+
+  FALLBACK_TIMEZONE = 'Asia/Kolkata'.freeze
+
+  # Redmine stores a friendly zone name ("Chennai"); Fugit needs the IANA one
+  # ("Asia/Kolkata"). Falls back when the setting is blank — deriving it from
+  # Rails would give UTC here and shift every schedule.
+  def default_agent_timezone
+    zone = Setting.default_users_time_zone.to_s.presence
+    (zone && ActiveSupport::TimeZone[zone]&.tzinfo&.name) || FALLBACK_TIMEZONE
+  end
+
+  # Assembles a 6-field (5 + IANA zone) cron string from the popup's
+  # frequency/time/weekday/day fields. The zone is not asked for — it comes
+  # from the instance setting, or stays whatever the agent already had, so
+  # editing an agent never silently shifts its schedule.
+  def build_agent_cron(params, current_cron = nil)
+    parts = current_cron.to_s.split
+    tz = (parts.size >= 6 ? parts[5] : nil) || default_agent_timezone
+    hour, minute = params[:time].to_s.split(':').map { |n| n.to_i }
+    return nil unless (0..23).cover?(hour) && (0..59).cover?(minute)
+
+    dow = case params[:frequency].to_s
+          when 'weekdays' then '1-5'
+          when 'weekly'   then params[:weekday].to_s.presence || '0'
+          else '*'
+          end
+    dom = params[:frequency].to_s == 'monthly' ? params[:day].to_s.presence || '1' : '*'
+    cron = "#{minute} #{hour} #{dom} * #{dow} #{tz}"
+
+    Fugit::Cron.parse(cron) ? cron : nil
+  end
 
   # Render a canned reply and store it, in the same shape as a model answer.
   def render_reply(text, chat, message, provider, settings)
@@ -790,9 +982,33 @@ class RedmineAgentController < ApplicationController
     message.strip.match?(/\A(hi|hello|hey|greetings|good (morning|afternoon|evening)|thanks|thank you)[!.\s]*\z/i)
   end
 
-  # Free-text instructions from plugin settings, appended to every system prompt.
+  # Free-text instructions from plugin settings, plus the current agent's task
+  # (if any), appended to every system prompt.
   def custom_instructions
-    Setting.plugin_redmine_agent['instructions'].to_s.strip
+    admin_text = Setting.plugin_redmine_agent['instructions'].to_s.strip
+    [admin_text, agent_task_block, agent_notify_block].reject(&:blank?).join("\n\n")
+  end
+
+  # Blank for the default Query Agent, so its prompt is unchanged.
+  def agent_task_block
+    return '' if @agent_task.blank?
+
+    "AGENT TASK\nYou are the \"#{@agent_name}\" agent inside Redmine. Your assigned task, " \
+    "which takes precedence over general behaviour (but never over the DATA RULES):\n\n#{@agent_task}"
+  end
+
+  def agent_notify_block
+    return '' if @agent_task.blank?
+
+    <<~PROMPT
+      NOTIFY BLOCK
+      If this task should notify specific people, end your reply with one short summary
+      line followed by exactly one fenced json code block:
+      {"agent_notify_v1": true, "recipients": [{"user_id": 0, "login": "", "mail": ""}], "message": ""}
+      Copy user_id, login and mail only from what the tools returned — never invent them,
+      and leave out anyone whose email you do not have. If there is nothing to notify
+      about, do not write this block at all — plain text is fine.
+    PROMPT
   end
 
   # Date and user facts the model has no other way to know, shared by the
@@ -986,7 +1202,9 @@ class RedmineAgentController < ApplicationController
     text = text.gsub(APPROVAL_MARKER_RE, '').strip
     text = (pending ? l(:label_agent_approval_prompt) : l(:label_agent_no_reply)) if text.blank?
     text = "#{text}\n\n#{APPROVAL_MARKER}" if pending
-    parse_structured_reply(text)
+    # The notify block was already lifted out upstream, so re-parsing this text
+    # can never find it again — carry the payload forward.
+    parse_structured_reply(text).merge(notify: reply[:notify])
   end
 
   # The tool a preview is waiting on, or nil when we can't run the action. The

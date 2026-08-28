@@ -27,6 +27,7 @@ class AiAgentChat < ActiveRecord::Base
   validates :user_id, presence: true
 
   scope :for_user, ->(user) { where(user_id: user.id) }
+  scope :for_agent, ->(agent) { where(ai_agent_id: agent.is_a?(AiAgent) ? agent.id : agent) }
   # The id tie-breaks rows created within the same timestamp tick: MySQL and
   # SQL Server store whole seconds / 3.33 ms steps, so created_at alone is not
   # a stable sort there.

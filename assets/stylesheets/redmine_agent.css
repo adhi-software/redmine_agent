@@ -676,6 +676,251 @@ html:has(.agent-config-error) #main.sidebar {
 /* ═════════════════════════════════════════════════════════════════════════════
    RESPONSIVE
    ═════════════════════════════════════════════════════════════════════════════ */
+/* ═════════════════════════════════════════════════════════════════════════════
+   AGENTS: sidebar "+" button, management panel, create/edit modal
+   ═════════════════════════════════════════════════════════════════════════════ */
+
+#agent-menu-actions {
+  padding: 4px 0 4px 20px;
+}
+
+#agent-add-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  padding: 4px 0;
+  color: #6b778c;
+  font-weight: 500;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+#agent-add-agent:hover {
+  color: #3b7ddd;
+}
+
+.agent-agents-panel-footer {
+  padding: 10px 14px;
+  border-top: 1px solid #e0e4e8;
+}
+
+/* The theme sets display:flex + align-items:baseline on every button, which
+   drops the label to the bottom edge (and past it, given the inherited
+   line-height). Every agent button re-centers on both axes explicitly. */
+.agent-new-agent-btn,
+.agent-agent-action-btn,
+.agent-form-actions button,
+#agent-add-agent {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.agent-new-agent-btn {
+  width: 100%;
+  padding: 8px;
+  border: 1px dashed #c7cdd6;
+  border-radius: 6px;
+  background: none;
+  color: #3b7ddd;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+  cursor: pointer;
+}
+
+.agent-new-agent-btn:hover {
+  background: #eaf1fc;
+}
+
+.agent-agent-item .agent-history-item-body {
+  cursor: pointer;
+}
+
+.agent-agent-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.agent-agent-action-btn {
+  border: 1px solid #e0e4e8;
+  border-radius: 4px;
+  background: #fff;
+  color: #667;
+  font-size: 11px;
+  padding: 3px 7px;
+  cursor: pointer;
+}
+
+.agent-agent-action-btn:hover {
+  background: #f4f6f9;
+  color: #333;
+}
+
+.agent-agent-action-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Create / edit modal */
+.agent-modal-backdrop[hidden] {
+  display: none;
+}
+
+.agent-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.agent-modal {
+  background: #fff;
+  border-radius: 8px;
+  width: 480px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+  padding: 20px 22px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
+}
+
+.agent-modal h3 {
+  margin: 0 0 14px;
+  font-size: 16px;
+  color: #333;
+}
+
+.agent-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+/* Day-of-week/day-of-month rows toggle via the native [hidden] attribute —
+   without this, the unconditional display:flex above would override it. */
+.agent-form-field[hidden] {
+  display: none;
+}
+
+.agent-form-field label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #555;
+}
+
+.agent-form-field input[type="text"],
+.agent-form-field input[type="time"],
+.agent-form-field input[type="number"],
+.agent-form-field textarea,
+.agent-form-field select {
+  border: 1px solid #d0d5dc;
+  border-radius: 6px;
+  padding: 7px 9px;
+  font-size: 13px;
+  font-family: inherit;
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.agent-form-hint {
+  margin: -6px 0 12px;
+  font-size: 11px;
+  color: #888;
+}
+
+.agent-sched-toggle {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-sched-toggle label {
+  font-weight: 600;
+  color: #333;
+}
+
+.agent-sched-fields {
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: #f8f9fb;
+  border-radius: 6px;
+}
+
+.agent-sched-fields[hidden] {
+  display: none;
+}
+
+.agent-form-section-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #555;
+  margin-bottom: 6px;
+}
+
+.agent-notify-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
+.agent-notify-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  color: #333;
+}
+
+.agent-notify-check.disabled {
+  color: #aaa;
+  cursor: not-allowed;
+}
+
+.agent-form-error {
+  min-height: 16px;
+  font-size: 12px;
+  color: #dc3545;
+  margin-bottom: 8px;
+}
+
+.agent-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.agent-form-actions button {
+  padding: 7px 16px;
+  border-radius: 6px;
+  border: 1px solid #d0d5dc;
+  background: #fff;
+  color: #333;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.agent-form-actions button.primary {
+  background: #3b7ddd;
+  border-color: #3b7ddd;
+  color: #fff;
+  font-weight: 600;
+}
+
+.agent-form-actions button.primary:hover {
+  background: #2e6bc4;
+}
+
 @media (max-width: 768px) {
   #redmine-agent-page {
     height: calc(100vh - 120px);
