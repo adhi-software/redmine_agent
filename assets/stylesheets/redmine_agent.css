@@ -296,6 +296,10 @@ html:has(.agent-config-error) #main.sidebar {
   margin-top: 2px;
 }
 
+.agent-history-item-time.agent-run-failed {
+  color: #c0392b;
+}
+
 /* Messages area */
 #agent-chat-messages {
   flex: 1;
@@ -701,15 +705,9 @@ html:has(.agent-config-error) #main.sidebar {
   color: #3b7ddd;
 }
 
-.agent-agents-panel-footer {
-  padding: 10px 14px;
-  border-top: 1px solid #e0e4e8;
-}
-
 /* The theme sets display:flex + align-items:baseline on every button, which
    drops the label to the bottom edge (and past it, given the inherited
    line-height). Every agent button re-centers on both axes explicitly. */
-.agent-new-agent-btn,
 .agent-agent-action-btn,
 .agent-form-actions button,
 #agent-add-agent {
@@ -717,23 +715,6 @@ html:has(.agent-config-error) #main.sidebar {
   align-items: center;
   justify-content: center;
   line-height: 1;
-}
-
-.agent-new-agent-btn {
-  width: 100%;
-  padding: 8px;
-  border: 1px dashed #c7cdd6;
-  border-radius: 6px;
-  background: none;
-  color: #3b7ddd;
-  font-size: 13px;
-  font-weight: 600;
-  text-align: center;
-  cursor: pointer;
-}
-
-.agent-new-agent-btn:hover {
-  background: #eaf1fc;
 }
 
 .agent-agent-item .agent-history-item-body {
@@ -865,26 +846,6 @@ html:has(.agent-config-error) #main.sidebar {
   font-weight: 600;
   color: #555;
   margin-bottom: 6px;
-}
-
-.agent-notify-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 14px;
-  margin-bottom: 12px;
-}
-
-.agent-notify-check {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 13px;
-  color: #333;
-}
-
-.agent-notify-check.disabled {
-  color: #aaa;
-  cursor: not-allowed;
 }
 
 .agent-form-error {

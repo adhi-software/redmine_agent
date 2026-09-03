@@ -4,9 +4,9 @@ require 'json'
 require 'socket'
 
 module RedmineAgent
-  # Executes one agent's task as a loopback chat request, delivers the reply's
-  # notify block, and records both as a run-history summary. Delivery lives
-  # here only, so ordinary chat never sends anything.
+  # Executes one agent's task as a loopback chat request and records the reply
+  # as a run-history summary. Anything the task should send goes out as an MCP
+  # tool call inside that chat, not from here.
   class Runner
     class << self
       def reachable?
@@ -28,9 +28,7 @@ module RedmineAgent
         end
 
         response = post_chat(agent['task'], run_as.api_key, agent['key'])
-        reply = response['reply'].to_s
-        # Delivery outcome goes first so it survives the excerpt truncation.
-        record['reply_excerpt'] = [notify!(agent, response['notify']), reply].compact.join("\n").truncate(300)
+        record['reply_excerpt'] = response['reply'].to_s.truncate(300)
         record['status'] = 'ok'
         CustomAgents.log_run(record)
       rescue => e
@@ -42,32 +40,6 @@ module RedmineAgent
       end
 
       private
-
-      # Delivers the chat reply's notify payload over whichever channels the
-      # agent has ticked. Returns a one-line summary for the run history, or nil.
-      def notify!(agent, payload)
-        channels = %w[slack email].select { |c| agent.dig('notify', c) }
-        return nil if channels.empty? || payload.blank?
-
-        recipients = Array(payload['recipients'])
-        return '[notify: nobody to notify]' if recipients.empty?
-
-        results = Delivery.deliver_validated(
-          recipients, payload['message'].to_s,
-          channels: channels, subject: agent['name'],
-          slack_channel: agent['slack_channel']
-        )
-        summarize(results, agent['slack_channel'])
-      rescue => e
-        Rails.logger.warn "RedmineAgent::Runner notify failed for #{agent['key']}: #{e.class}: #{e.message}"
-        "[notify error: #{e.message.to_s.truncate(80)}]"
-      end
-
-      def summarize(results, channel)
-        counts = results.group_by { |r| r[:channels]['slack'] || r[:status] }.transform_values(&:size)
-        "[notify #{channel.presence || 'DM'}: " +
-          counts.map { |status, n| "#{n} #{status}" }.join(', ') + ']'
-      end
 
       def base_url
         Setting.plugin_redmine_agent['base_url'].to_s.presence || 'http://127.0.0.1:3000'
@@ -83,7 +55,8 @@ module RedmineAgent
         req = Net::HTTP::Post.new(uri.request_uri)
         req['Content-Type']       = 'application/json'
         req['X-Redmine-API-Key']  = api_key.to_s
-        req.body = { message: prompt, agent_key: agent_key }.to_json
+        # runner:1 skips the approval gate — a scheduled run has nobody to ask.
+        req.body = { message: prompt, agent_key: agent_key, runner: '1' }.to_json
 
         response = http.request(req)
         JSON.parse(response.body)

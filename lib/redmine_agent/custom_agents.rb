@@ -19,17 +19,20 @@ module RedmineAgent
     # registered as the controller's default (menu_item :ai_agent_query).
     QUERY_AGENT_KEY = 'query'.freeze
 
+    # Runs kept per agent.
+    MAX_RUNS_PER_AGENT = 50
+
+    # To have a reminder delivered, add a line to the agent's task naming the
+    # Slack channel id, e.g. "Then send that reminder to C01234567 with
+    # slack_send_message." Nothing is sent unless the task asks for it.
     CLOCK_IN_PROMPT = <<~PROMPT.freeze
       Find the active employees who have not clocked in today.
 
       Use the attendance and employee tools to work out who is absent. Then reply
-      with one short summary line followed by exactly one fenced json code block:
-      {"agent_notify_v1": true, "recipients": [{"user_id": 0, "login": "", "mail": ""}], "message": ""}
-      - Copy each absent employee's user_id, login and mail only from what the tools
-        returned; leave out anyone whose email you do not have.
-      - Always write the block, even when everyone has clocked in - then recipients
-        is just an empty list.
-      - message: a short, polite reminder to clock in for today.
+      with one short summary line followed by the absent employees, one per line,
+      as "name (login)". Name only people the tools actually returned.
+
+      End with a short, polite reminder to clock in for today.
     PROMPT
 
     TIMESHEET_PROMPT = <<~PROMPT.freeze
@@ -43,36 +46,26 @@ module RedmineAgent
          Submitted or Approved.
       3. Anyone whose status is Empty, New or Rejected has not submitted.
 
-      Then reply with one short summary line followed by exactly one fenced json code block:
-      {"agent_notify_v1": true, "recipients": [{"user_id": 0, "login": "", "mail": ""}], "message": ""}
-      - Copy each person's user_id, login and mail only from what the tools returned;
-        leave out anyone whose email you do not have.
-      - Always write the block, even when everyone has submitted - then recipients
-        is just an empty list.
-      - message: a short, polite reminder to submit this week's timesheet before the
-        week closes.
+      Then reply with one short summary line followed by those people, one per line,
+      as "name (login)". Name only people the tools actually returned.
+
+      End with a short, polite reminder to submit this week's timesheet before the
+      week closes.
     PROMPT
 
     # Seeded once on first use.
     BUILT_INS = [
-      { 'key' => QUERY_AGENT_KEY, 'name' => 'Query Agent', 'task' => '', 'cron' => nil,
-        'notify' => { 'slack' => false, 'email' => false, 'teams' => false, 'jira' => false } },
+      { 'key' => QUERY_AGENT_KEY, 'name' => 'Query Agent', 'task' => '', 'cron' => nil },
       { 'key' => 'clock_in_reminder', 'name' => 'Clock-in reminder', 'task' => CLOCK_IN_PROMPT,
-        'cron' => '0 10 * * 1-5 Asia/Kolkata',
-        'notify' => { 'slack' => false, 'email' => false, 'teams' => false, 'jira' => false } },
+        'cron' => '0 10 * * 1-5 Asia/Kolkata' },
       { 'key' => 'timesheet_submit_reminder', 'name' => 'Timesheet submit reminder', 'task' => TIMESHEET_PROMPT,
-        'cron' => '0 18 * * 5 Asia/Kolkata',
-        'notify' => { 'slack' => false, 'email' => false, 'teams' => false, 'jira' => false } }
+        'cron' => '0 18 * * 5 Asia/Kolkata' }
     ].freeze
 
     class << self
       def all
         seed!
         Array(Setting.plugin_redmine_agent['custom_agents']).map { |a| normalize(a) }
-      end
-
-      def enabled
-        all.select { |a| a['enabled'] != false }
       end
 
       def find(key)
@@ -110,13 +103,16 @@ module RedmineAgent
         updated
       end
 
+      # Takes everything keyed to the agent with it: its chat history (via the
+      # AiAgent row) and its run log.
       def delete(key)
-        found = false
-        mutate do |list|
-          found = list.any? { |a| a['key'] == key.to_s }
-          list.reject! { |a| a['key'] == key.to_s }
-        end
-        found
+        agent = find(key)
+        return false unless agent
+
+        mutate { |list| list.reject! { |a| a['key'] == key.to_s } }
+        AiAgent.find_by(id: agent['ai_agent_id'])&.destroy if agent['ai_agent_id'].present?
+        AgentRun.for_agent(key).delete_all
+        true
       end
 
       def last_run(agent_key)
@@ -149,6 +145,7 @@ module RedmineAgent
           AgentRun.create!(attrs.merge(agent_key: record['key'], stamp: record['stamp'],
                                        started_at: record['started_at'] || Time.now))
         end
+        prune_runs(record['key'])
         record
       rescue => e
         Rails.logger.warn "RedmineAgent: failed to log run for #{record['key']}: #{e.message}"
@@ -173,12 +170,28 @@ module RedmineAgent
         rec
       end
 
+      # Carries a rename/retask onto the linked AiAgent row — the mobile
+      # /redmine_agent/agents list reads the name from there.
+      def sync_ai_agent!(agent)
+        return unless agent && agent['ai_agent_id'].present?
+
+        rec = AiAgent.find_by(id: agent['ai_agent_id'])
+        return unless rec
+
+        attrs = { name: agent['name'], description: agent['task'].to_s.truncate(255) }
+        # An orphan row may already hold the name — same fallback as #ai_agent_record.
+        rec.update(attrs) || rec.update(attrs.merge(name: "#{agent['name']} (#{agent['key']})"))
+        rec
+      rescue ActiveRecord::RecordNotUnique
+        nil
+      end
+
       # Reconciles the registered :ai_agent_* menu items against the current
       # agent list. Cheap no-op when nothing changed (the common case, since
       # this runs on every relevant request so every app worker stays in
       # sync without a restart).
       def sync_menu!
-        desired = enabled.map { |a| [a['key'], a['name'].to_s] }
+        desired = all.map { |a| [a['key'], a['name'].to_s] }
         return if desired == @menu_signature
 
         SYNC_MUTEX.synchronize do
@@ -201,14 +214,14 @@ module RedmineAgent
 
       private
 
+      # Drops this agent's oldest runs — the log is a rolling window, not an archive.
+      def prune_runs(agent_key)
+        stale = AgentRun.for_agent(agent_key).recent_first.offset(MAX_RUNS_PER_AGENT).pluck(:id)
+        AgentRun.where(id: stale).delete_all if stale.any?
+      end
+
       def normalize(attrs)
-        a = attrs.transform_keys(&:to_s)
-        a['notify'] = { 'slack' => false, 'email' => false, 'teams' => false, 'jira' => false }
-                        .merge((a['notify'] || {}).transform_keys(&:to_s))
-        a['notify']['teams'] = false
-        a['notify']['jira'] = false
-        a['notify'] = a['notify'].slice('slack', 'email', 'teams', 'jira')
-        a
+        attrs.transform_keys(&:to_s).except('notify')
       end
 
       def mutate(list_key: 'custom_agents')

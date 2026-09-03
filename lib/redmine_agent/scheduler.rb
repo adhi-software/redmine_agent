@@ -2,7 +2,7 @@ require 'rufus/scheduler'
 require 'fugit'
 
 module RedmineAgent
-  # Once-a-minute cron tick over CustomAgents.enabled (agents that have a
+  # Once-a-minute cron tick over CustomAgents.all (agents that have a
   # 'cron' set). Runs in-process with the Rails web server — started once from
   # init.rb's after_initialize hook.
   class Scheduler
@@ -33,7 +33,7 @@ module RedmineAgent
         now = Time.at((Time.now.to_i / 60) * 60)
         minute = now.strftime('%Y-%m-%d %H:%M')
 
-        CustomAgents.enabled.each do |agent|
+        CustomAgents.all.each do |agent|
           next if agent['cron'].blank?
 
           cron = Fugit::Cron.parse(agent['cron'])

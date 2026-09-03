@@ -49,30 +49,14 @@ module RedmineAgentHelper
        .gsub(/\|\s*\|/, "|\n|")     # table rows run together onto one line
   end
 
-  NOTIFY_BLOCK_RE = /```(?:json)?\s*(\{.*?\})\s*```/m
-
-  # Lifts the agent's machine-readable notify block out of the reply, so it is
-  # delivered but never shown in the chat. Returns [visible text, payload].
-  def extract_notify_block(raw)
-    payload = nil
-    text = raw.to_s.gsub(NOTIFY_BLOCK_RE) do
-      parsed = JSON.parse(Regexp.last_match(1)) rescue nil
-      next Regexp.last_match(0) unless parsed.is_a?(Hash) && parsed['agent_notify_v1']
-
-      payload = parsed
-      ''
-    end
-    [text, payload]
-  end
-
   # Convert the model's markdown reply into sanitized HTML for the web, plus
   # normalized markdown for clients that render it themselves (the mobile app).
   def parse_structured_reply(raw)
-    text, notify = extract_notify_block(raw)
+    text    = raw.to_s
     cleaned = normalize_markdown(text)
 
     { reply: text.strip, type: 'html', html: render_markdown(cleaned),
-      markdown: cleaned, notify: notify }
+      markdown: cleaned }
   end
 
   def user_chats(user, ai_agent = nil)
@@ -128,8 +112,27 @@ module RedmineAgentHelper
     nil
   end
 
-  def mcp_server_url
-    "#{Setting.protocol}://#{Setting.host_name}".chomp('/') + '/mcp'
+  # Every MCP server the chat can reach: the built-in Redmine one, plus the
+  # rows configured in the plugin settings (Slack, Teams, ...).
+  def mcp_servers
+    servers = []
+    if mcp_installed?
+      servers << { name: 'redmine', builtin: true,
+                   url: "#{Setting.protocol}://#{Setting.host_name}".chomp('/') + '/mcp',
+                   token: User.current.try(:api_key).to_s }
+    end
+    servers + configured_mcp_servers
+  end
+
+  # Settings rows are pipe-encoded as name|url|token|connected.
+  def configured_mcp_servers
+    Array(Setting.plugin_redmine_agent['mcp_servers']).reject(&:blank?).filter_map do |row|
+      name, url, token = row.to_s.split('|', 4)
+      next if url.to_s.strip.blank?
+
+      { name: name.to_s.strip.presence || 'mcp', builtin: false,
+        url: url.to_s.strip, token: token.to_s.strip }
+    end
   end
 
   def agent_model_configured?

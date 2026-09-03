@@ -36,11 +36,11 @@
           those controls out entirely instead of showing a 403 on click. %>
       <% if User.current.admin? %>
         data-custom-agents-url="<%= url_for(controller: '/redmine_agent', action: 'custom_agents') %>"
+        data-current-agent-key="<%= @current_agent_key %>"
       <% end %>
       data-i18n-agents-title="<%= l(:label_agent_agents_title) %>"
       data-i18n-manage-agents="<%= l(:label_agent_manage_agents) %>"
       data-i18n-no-agents="<%= l(:label_agent_no_agents) %>"
-      data-i18n-new-agent="<%= l(:label_agent_new_agent) %>"
       data-i18n-edit-agent="<%= l(:label_agent_edit_agent) %>"
       data-i18n-add-agent="<%= l(:label_agent_add_agent) %>"
       data-i18n-agent-name="<%= l(:label_agent_agent_name) %>"
@@ -56,15 +56,9 @@
       data-i18n-schedule-time="<%= l(:label_agent_schedule_time) %>"
       data-i18n-schedule-weekday="<%= l(:label_agent_schedule_weekday) %>"
       data-i18n-schedule-day="<%= l(:label_agent_schedule_day) %>"
+      data-i18n-schedule-last-day="<%= l(:label_agent_schedule_last_day) %>"
+      data-i18n-schedule-day-warning="<%= l(:label_agent_schedule_day_warning) %>"
       data-i18n-schedule-timezone="<%= l(:label_agent_schedule_timezone) %>"
-      data-i18n-notify="<%= l(:label_agent_notify) %>"
-      data-i18n-notify-slack="<%= l(:label_agent_notify_slack) %>"
-      data-i18n-notify-email="<%= l(:label_agent_notify_email) %>"
-      data-i18n-notify-teams="<%= l(:label_agent_notify_teams) %>"
-      data-i18n-notify-jira="<%= l(:label_agent_notify_jira) %>"
-      data-i18n-notify-coming-soon="<%= l(:label_agent_notify_coming_soon) %>"
-      data-i18n-slack-channel="<%= l(:label_agent_slack_channel) %>"
-      data-i18n-slack-channel-hint="<%= l(:label_agent_slack_channel_hint) %>"
       data-i18n-save="<%= l(:label_agent_save) %>"
       data-i18n-saving="<%= l(:label_agent_saving) %>"
       data-i18n-save-failed="<%= l(:label_agent_save_failed) %>"
@@ -72,7 +66,13 @@
       data-i18n-delete-agent-confirm="<%= l(:label_agent_delete_agent_confirm) %>"
       data-i18n-run-now="<%= l(:label_agent_run_now) %>"
       data-i18n-running="<%= l(:label_agent_running) %>"
-      data-i18n-never-run="<%= l(:label_agent_never_run) %>">
+      data-i18n-never-run="<%= l(:label_agent_never_run) %>"
+      data-i18n-last-run="<%= l(:label_agent_last_run) %>"
+      data-i18n-day-names="<%= I18n.t('date.day_names').join(',') %>"
+      data-i18n-error-name-blank="<%= l(:error_agent_name_blank) %>"
+      data-i18n-error-task-blank="<%= l(:error_agent_task_blank) %>"
+      data-i18n-error-schedule="<%= l(:error_agent_invalid_schedule) %>"
+      data-agent-timezone="<%= @agent_timezone %>">
 
     <%# ── CHAT AREA ── %>
     <main id="agent-chat-area">
@@ -92,7 +92,8 @@
           <button id="agent-history-chat" class="primary" type="button" title="<%= l(:label_agent_recents) %>">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 12c0 1.1-.9 2-2 2s-2-.9-2-2 .9-2 2-2 2 .9 2 2zm6 0c0 1.1-.9 2-2 2s-2-.9-2-2 .9-2 2-2 2 .9 2 2zm6 0c0 1.1-.9 2-2 2s-2-.9-2-2 .9-2 2-2 2 .9 2 2z"/></svg>
           </button>
-          <% if User.current.admin? %>
+          <%# Query Agent has no settings of its own, so no gear there. %>
+          <% if User.current.admin? && @current_agent_key.present? %>
             <button id="agent-manage-agents" class="primary" type="button" title="<%= l(:label_agent_manage_agents) %>">
               <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm8.94 4a7.93 7.93 0 0 0-.14-1.47l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.6-.22l-2.49 1a7.97 7.97 0 0 0-1.27-.74l-.38-2.65A.5.5 0 0 0 15.8 2h-3.6a.5.5 0 0 0-.5.43l-.38 2.65c-.46.2-.88.45-1.27.74l-2.49-1a.5.5 0 0 0-.6.22l-2 3.46a.5.5 0 0 0 .12.64l2.11 1.65c-.09.48-.14.97-.14 1.47s.05.99.14 1.47l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46c.13.22.39.3.6.22l2.49-1c.39.29.81.54 1.27.74l.38 2.65c.05.24.25.43.5.43h3.6c.25 0 .45-.19.5-.43l.38-2.65c.46-.2.88-.44 1.27-.74l2.49 1c.22.08.47 0 .6-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.11-1.65c.09-.48.14-.97.14-1.47z"/></svg>
             </button>
@@ -107,9 +108,6 @@
             <button id="agent-agents-close" type="button" title="<%= l(:button_close) %>">&times;</button>
           </div>
           <div id="agent-agents-list" class="agent-history-list"></div>
-          <div class="agent-agents-panel-footer">
-            <button id="agent-new-agent-btn" type="button" class="agent-new-agent-btn"><%= l(:label_agent_new_agent) %></button>
-          </div>
         </div>
       <% end %>
 

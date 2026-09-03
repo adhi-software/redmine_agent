@@ -74,6 +74,8 @@ document.addEventListener('DOMContentLoaded', function () {
     historyBtn.addEventListener('click', function (e) {
       e.stopPropagation();
       if (historyPanel.hidden) {
+        // Both popups sit in the same spot, so only one can be open.
+        hideAgentsPanel();
         loadHistory();
         historyPanel.hidden = false;
       } else {
@@ -456,7 +458,6 @@ document.addEventListener('DOMContentLoaded', function () {
   var agentsPanel = document.getElementById('agent-agents-panel');
   var agentsList = document.getElementById('agent-agents-list');
   var agentsClose = document.getElementById('agent-agents-close');
-  var newAgentBtn = document.getElementById('agent-new-agent-btn');
   var addAgentBtn = document.getElementById('agent-add-agent');
 
   var ai18n = {
@@ -469,6 +470,7 @@ document.addEventListener('DOMContentLoaded', function () {
     agentTaskHint: page.getAttribute('data-i18n-agent-task-hint'),
     agentSchedule: page.getAttribute('data-i18n-agent-schedule'),
     freqLabel: page.getAttribute('data-i18n-schedule-frequency'),
+    freqNone: page.getAttribute('data-i18n-schedule-none'),
     freqDaily: page.getAttribute('data-i18n-schedule-daily'),
     freqWeekdays: page.getAttribute('data-i18n-schedule-weekdays'),
     freqWeekly: page.getAttribute('data-i18n-schedule-weekly'),
@@ -476,14 +478,8 @@ document.addEventListener('DOMContentLoaded', function () {
     timeLabel: page.getAttribute('data-i18n-schedule-time'),
     weekdayLabel: page.getAttribute('data-i18n-schedule-weekday'),
     dayLabel: page.getAttribute('data-i18n-schedule-day'),
-    notify: page.getAttribute('data-i18n-notify'),
-    notifySlack: page.getAttribute('data-i18n-notify-slack'),
-    notifyEmail: page.getAttribute('data-i18n-notify-email'),
-    notifyTeams: page.getAttribute('data-i18n-notify-teams'),
-    notifyJira: page.getAttribute('data-i18n-notify-jira'),
-    comingSoon: page.getAttribute('data-i18n-notify-coming-soon'),
-    slackChannel: page.getAttribute('data-i18n-slack-channel'),
-    slackChannelHint: page.getAttribute('data-i18n-slack-channel-hint'),
+    lastDay: page.getAttribute('data-i18n-schedule-last-day'),
+    dayWarning: page.getAttribute('data-i18n-schedule-day-warning'),
     save: page.getAttribute('data-i18n-save'),
     saving: page.getAttribute('data-i18n-saving'),
     saveFailed: page.getAttribute('data-i18n-save-failed'),
@@ -491,8 +487,17 @@ document.addEventListener('DOMContentLoaded', function () {
     deleteAgentConfirm: page.getAttribute('data-i18n-delete-agent-confirm'),
     runNow: page.getAttribute('data-i18n-run-now'),
     running: page.getAttribute('data-i18n-running'),
-    neverRun: page.getAttribute('data-i18n-never-run')
+    neverRun: page.getAttribute('data-i18n-never-run'),
+    lastRun: page.getAttribute('data-i18n-last-run'),
+    timezone: page.getAttribute('data-i18n-schedule-timezone'),
+    dayNames: (page.getAttribute('data-i18n-day-names') || '').split(','),
+    errNameBlank: page.getAttribute('data-i18n-error-name-blank'),
+    errTaskBlank: page.getAttribute('data-i18n-error-task-blank'),
+    errSchedule: page.getAttribute('data-i18n-error-schedule')
   };
+
+  // Zone new schedules are saved in; existing ones keep whatever their cron has.
+  var defaultTimezone = page.getAttribute('data-agent-timezone') || '';
 
   function jsonHeaders() {
     return { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken ? csrfToken.content : '' };
@@ -502,15 +507,24 @@ document.addEventListener('DOMContentLoaded', function () {
     if (agentsPanel) agentsPanel.hidden = true;
   }
 
+  // Set on a custom agent's own page: the icon edits that agent instead of
+  // listing every agent. Blank on the Query Agent page.
+  var currentAgentKey = page.getAttribute('data-current-agent-key') || '';
+
+  function toggleAgentsPanel() {
+    if (agentsPanel.hidden) {
+      hideHistoryPanel();
+      loadAgentsList();
+      agentsPanel.hidden = false;
+    } else {
+      hideAgentsPanel();
+    }
+  }
+
   if (manageBtn) {
     manageBtn.addEventListener('click', function (e) {
       e.stopPropagation();
-      if (agentsPanel.hidden) {
-        loadAgentsList();
-        agentsPanel.hidden = false;
-      } else {
-        hideAgentsPanel();
-      }
+      toggleAgentsPanel();
     });
   }
   if (agentsClose) agentsClose.addEventListener('click', hideAgentsPanel);
@@ -535,11 +549,33 @@ document.addEventListener('DOMContentLoaded', function () {
 
   function renderAgentsList(agents) {
     agentsList.innerHTML = '';
+    // The icon only exists on an agent's own page, so it lists just that agent.
+    if (currentAgentKey) {
+      agents = agents.filter(function (a) { return a.key === currentAgentKey; });
+    }
     if (!agents.length) {
       agentsList.appendChild(emptyRow(ai18n.noAgents));
       return;
     }
     agents.forEach(function (agent) { agentsList.appendChild(buildAgentRow(agent)); });
+  }
+
+  // Runs migrated from the old settings-blob log have no started_at, and carry
+  // the reason inside status ("error: Errno::ECONNREFUSED") instead of in error.
+  function runFailed(run) {
+    return !!run && /^error/i.test(String(run.status || ''));
+  }
+
+  // Seconds are noise here, and the panel is narrow enough that they wrap the row.
+  function shortStamp(value) {
+    return new Date(value).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+  }
+
+  function lastRunText(run) {
+    if (!run) return ai18n.neverRun;
+    var when = run.started_at ? shortStamp(run.started_at) : '';
+    var parts = [when, run.status].filter(function (p) { return p; });
+    return ai18n.lastRun + (parts.length ? ': ' + parts.join(' · ') : '');
   }
 
   function buildAgentRow(agent) {
@@ -551,20 +587,28 @@ document.addEventListener('DOMContentLoaded', function () {
 
     var name = document.createElement('div');
     name.className = 'agent-history-item-request';
-    name.textContent = agent.name + (agent.enabled === false ? ' (disabled)' : '');
+    name.textContent = agent.name;
 
     var meta = document.createElement('div');
     meta.className = 'agent-history-item-time';
     var bits = [];
-    if (agent.cron) bits.push(agent.next_run ? new Date(agent.next_run).toLocaleString() : ai18n.runNow);
-    var notifyBits = [];
-    if (agent.notify && agent.notify.slack) notifyBits.push(ai18n.notifySlack);
-    if (agent.notify && agent.notify.email) notifyBits.push(ai18n.notifyEmail);
-    if (notifyBits.length) bits.push(notifyBits.join(', '));
+    if (agent.cron) bits.push(agent.next_run ? shortStamp(agent.next_run) : ai18n.runNow);
     meta.textContent = bits.join(' · ');
 
+    // Its own line: the column is too narrow to keep this inline without the
+    // label wrapping away from its value.
+    var lastRun = document.createElement('div');
+    lastRun.className = 'agent-history-item-time';
+    lastRun.textContent = lastRunText(agent.last_run);
+    if (runFailed(agent.last_run)) {
+      lastRun.classList.add('agent-run-failed');
+      // The full message only fits in a tooltip.
+      if (agent.last_run.error) lastRun.title = agent.last_run.error;
+    }
+
     body.appendChild(name);
-    body.appendChild(meta);
+    if (bits.length) body.appendChild(meta);
+    body.appendChild(lastRun);
     body.addEventListener('click', function () { openAgentForm(agent); });
 
     var actions = document.createElement('div');
@@ -577,22 +621,22 @@ document.addEventListener('DOMContentLoaded', function () {
     editBtn.addEventListener('click', function (e) { e.stopPropagation(); openAgentForm(agent); });
     actions.appendChild(editBtn);
 
-    if (agent.cron) {
-      var runBtn = document.createElement('button');
-      runBtn.type = 'button';
-      runBtn.className = 'agent-agent-action-btn';
-      runBtn.textContent = ai18n.runNow;
-      runBtn.addEventListener('click', function (e) {
-        e.stopPropagation();
-        runBtn.disabled = true;
-        runBtn.textContent = ai18n.running;
-        fetch(customAgentsUrl + '/' + agent.key + '/run', { method: 'POST', headers: jsonHeaders() })
-          .then(function (r) { return r.json(); })
-          .then(function () { runBtn.disabled = false; runBtn.textContent = ai18n.runNow; })
-          .catch(function () { runBtn.disabled = false; runBtn.textContent = ai18n.runNow; });
-      });
-      actions.appendChild(runBtn);
-    }
+    // Every agent can be run on demand — a schedule is not what makes it runnable.
+    var runBtn = document.createElement('button');
+    runBtn.type = 'button';
+    runBtn.className = 'agent-agent-action-btn';
+    runBtn.textContent = ai18n.runNow;
+    runBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      runBtn.disabled = true;
+      runBtn.textContent = ai18n.running;
+      fetch(customAgentsUrl + '/' + agent.key + '/run', { method: 'POST', headers: jsonHeaders() })
+        .then(function (r) { return r.json(); })
+        // Reloading shows the run that just finished, and its status.
+        .then(function () { loadAgentsList(); })
+        .catch(function () { runBtn.disabled = false; runBtn.textContent = ai18n.runNow; });
+    });
+    actions.appendChild(runBtn);
 
     if (agent.deletable) {
       var delBtn = document.createElement('button');
@@ -606,6 +650,8 @@ document.addEventListener('DOMContentLoaded', function () {
         fetch(customAgentsUrl + '/' + agent.key, { method: 'DELETE', headers: jsonHeaders() })
           .then(function (r) { return r.json(); })
           .then(function () {
+            // Deleting the agent whose page this is leaves a 404 behind on reload.
+            if (agent.key === currentAgentKey) { window.location.href = window.location.pathname; return; }
             row.remove();
             removeAgentMenuItem(agent.key);
             if (!agentsList.children.length) agentsList.appendChild(emptyRow(ai18n.noAgents));
@@ -635,6 +681,10 @@ document.addEventListener('DOMContentLoaded', function () {
     a.href = menu.url;
     a.className = 'ai-agent-' + menu.key;
     a.textContent = menu.name;
+    // The theme only decorates menu links once, on load, so borrow a sibling's
+    // icon rather than leaving this row bare until the next page load.
+    var icon = ul.querySelector('li > svg');
+    if (icon) li.appendChild(icon.cloneNode(true));
     li.appendChild(a);
     ul.appendChild(li);
   }
@@ -664,22 +714,10 @@ document.addEventListener('DOMContentLoaded', function () {
     return l;
   }
 
-  function notifyCheckbox(labelText, checked, disabled) {
-    var wrap = document.createElement('label');
-    wrap.className = 'agent-notify-check' + (disabled ? ' disabled' : '');
-    var input = document.createElement('input');
-    input.type = 'checkbox';
-    input.checked = !!checked;
-    input.disabled = !!disabled;
-    wrap.appendChild(input);
-    wrap.appendChild(document.createTextNode(' ' + labelText));
-    return { wrap: wrap, input: input };
-  }
-
   function parseCronForForm(cron) {
-    if (!cron) return { frequency: 'none', time: '09:00', weekday: '0', day: '1', timezone: 'Asia/Kolkata' };
+    if (!cron) return { frequency: 'none', time: '09:00', weekday: '0', day: '1', timezone: defaultTimezone };
     var parts = cron.trim().split(/\s+/);
-    var min = parts[0], hour = parts[1], dom = parts[2], dow = parts[4], tz = parts[5] || 'Asia/Kolkata';
+    var min = parts[0], hour = parts[1], dom = parts[2], dow = parts[4], tz = parts[5] || defaultTimezone;
     var time = (hour.length < 2 ? '0' + hour : hour) + ':' + (min.length < 2 ? '0' + min : min);
     var frequency = 'daily', weekday = '0', day = '1';
     if (dow === '1-5') { frequency = 'weekdays'; }
@@ -740,25 +778,18 @@ document.addEventListener('DOMContentLoaded', function () {
     taskHint.textContent = ai18n.agentTaskHint;
     form.appendChild(taskHint);
 
-    var schedWrap = document.createElement('div');
-    schedWrap.className = 'agent-form-field agent-sched-toggle';
-    var schedCheck = document.createElement('input');
-    schedCheck.type = 'checkbox';
-    schedCheck.id = 'agent-form-sched-on';
-    schedCheck.checked = sched.frequency !== 'none';
-    var schedCheckLabel = document.createElement('label');
-    schedCheckLabel.htmlFor = 'agent-form-sched-on';
-    schedCheckLabel.textContent = ai18n.agentSchedule;
-    schedWrap.appendChild(schedCheck);
-    schedWrap.appendChild(schedCheckLabel);
-    form.appendChild(schedWrap);
+    var schedLabel = document.createElement('div');
+    schedLabel.className = 'agent-form-section-label';
+    schedLabel.textContent = ai18n.agentSchedule;
+    form.appendChild(schedLabel);
 
     var schedFields = document.createElement('div');
     schedFields.className = 'agent-sched-fields';
 
+    // 'none' replaces the old on/off checkbox — it is how an agent is left unscheduled.
     var freqSelect = document.createElement('select');
     freqSelect.className = 'multi-row';
-    [['daily', ai18n.freqDaily], ['weekdays', ai18n.freqWeekdays], ['weekly', ai18n.freqWeekly], ['monthly', ai18n.freqMonthly]]
+    [['none', ai18n.freqNone], ['daily', ai18n.freqDaily], ['weekdays', ai18n.freqWeekdays], ['weekly', ai18n.freqWeekly], ['monthly', ai18n.freqMonthly]]
       .forEach(function (pair) {
         var opt = document.createElement('option');
         opt.value = pair[0];
@@ -771,11 +802,20 @@ document.addEventListener('DOMContentLoaded', function () {
     var timeInput = document.createElement('input');
     timeInput.type = 'time';
     timeInput.value = sched.time;
-    schedFields.appendChild(labeled(textLabel(ai18n.timeLabel), timeInput));
+    var timeRow = labeled(textLabel(ai18n.timeLabel), timeInput);
+    // The zone is never asked for, so say which one the time is read in.
+    if (sched.timezone) {
+      var tzHint = document.createElement('p');
+      tzHint.className = 'agent-form-hint';
+      tzHint.textContent = ai18n.timezone + ': ' + sched.timezone;
+      timeRow.appendChild(tzHint);
+    }
+    schedFields.appendChild(timeRow);
 
     var weekdaySelect = document.createElement('select');
     weekdaySelect.className = 'multi-row';
-    ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].forEach(function (d, i) {
+    // date.day_names is 0-indexed from Sunday, same as cron's day-of-week.
+    ai18n.dayNames.forEach(function (d, i) {
       var opt = document.createElement('option');
       opt.value = i;
       opt.textContent = d;
@@ -785,60 +825,51 @@ document.addEventListener('DOMContentLoaded', function () {
     var weekdayRow = labeled(textLabel(ai18n.weekdayLabel), weekdaySelect);
     schedFields.appendChild(weekdayRow);
 
-    var dayInput = document.createElement('input');
-    dayInput.type = 'number';
-    dayInput.min = 1;
-    dayInput.max = 31;
-    dayInput.value = sched.day;
-    var dayRow = labeled(textLabel(ai18n.dayLabel), dayInput);
+    // 1-28 plus "L" (fugit's last-day-of-month), so a day that some months
+    // don't have can't be picked at all.
+    var daySelect = document.createElement('select');
+    daySelect.className = 'multi-row';
+    var dayOptions = [];
+    for (var dnum = 1; dnum <= 28; dnum++) dayOptions.push([String(dnum), String(dnum)]);
+    // An agent saved on 29-31 predates this list; keep its value as an option so
+    // opening the form doesn't silently move its schedule to the 1st.
+    if (/^(29|30|31)$/.test(String(sched.day))) dayOptions.push([String(sched.day), String(sched.day)]);
+    dayOptions.push(['L', ai18n.lastDay]);
+
+    dayOptions.forEach(function (pair) {
+      var opt = document.createElement('option');
+      opt.value = pair[0];
+      opt.textContent = pair[1];
+      if (String(sched.day) === pair[0]) opt.selected = true;
+      daySelect.appendChild(opt);
+    });
+    var dayRow = labeled(textLabel(ai18n.dayLabel), daySelect);
+
+    var dayHint = document.createElement('p');
+    dayHint.className = 'agent-form-hint';
+    dayHint.textContent = ai18n.dayWarning;
+    dayRow.appendChild(dayHint);
+
+    function syncDayHint() {
+      dayHint.hidden = !/^(29|30|31)$/.test(daySelect.value);
+    }
+    daySelect.addEventListener('change', syncDayHint);
+    syncDayHint();
+
     schedFields.appendChild(dayRow);
 
     form.appendChild(schedFields);
 
     function syncSchedVisibility() {
-      schedFields.hidden = !schedCheck.checked;
+      timeRow.hidden = freqSelect.value === 'none';
       weekdayRow.hidden = freqSelect.value !== 'weekly';
       dayRow.hidden = freqSelect.value !== 'monthly';
     }
-    schedCheck.addEventListener('change', syncSchedVisibility);
     freqSelect.addEventListener('change', syncSchedVisibility);
     syncSchedVisibility();
 
-    var notifyLabel = document.createElement('div');
-    notifyLabel.className = 'agent-form-section-label';
-    notifyLabel.textContent = ai18n.notify;
-    form.appendChild(notifyLabel);
-
-    var notifyRow = document.createElement('div');
-    notifyRow.className = 'agent-notify-row';
-    var slackCheck = notifyCheckbox(ai18n.notifySlack, initial.notify && initial.notify.slack, false);
-    var emailCheck = notifyCheckbox(ai18n.notifyEmail, initial.notify && initial.notify.email, false);
-    var teamsCheck = notifyCheckbox(ai18n.notifyTeams + ' ' + ai18n.comingSoon, false, true);
-    var jiraCheck = notifyCheckbox(ai18n.notifyJira + ' ' + ai18n.comingSoon, false, true);
-    [slackCheck, emailCheck, teamsCheck, jiraCheck].forEach(function (c) { notifyRow.appendChild(c.wrap); });
-    form.appendChild(notifyRow);
-
-    // Channel is asked for only once Slack is ticked; blank means DM each
-    // person instead of posting to a channel.
-    var channelInput = document.createElement('input');
-    channelInput.type = 'text';
-    channelInput.placeholder = '#reminders';
-    channelInput.value = initial.slack_channel || '';
-    var channelRow = labeled(textLabel(ai18n.slackChannel), channelInput);
-    channelRow.classList.add('agent-slack-channel');
-
-    var channelHint = document.createElement('p');
-    channelHint.className = 'agent-form-hint';
-    channelHint.textContent = ai18n.slackChannelHint;
-    channelRow.appendChild(channelHint);
-    form.appendChild(channelRow);
-
-    function syncChannelVisibility() {
-      channelRow.hidden = !slackCheck.input.checked;
-    }
-    slackCheck.input.addEventListener('change', syncChannelVisibility);
-    syncChannelVisibility();
-
+    // No delivery channels here any more: whatever the agent should send goes
+    // out as an MCP tool call its task asks for.
     box.appendChild(form);
 
     var errorMsg = document.createElement('div');
@@ -861,22 +892,19 @@ document.addEventListener('DOMContentLoaded', function () {
       var name = nameInput.value.trim();
       var task = taskInput.value.trim();
       errorMsg.textContent = '';
-      if (!name || !task) { errorMsg.textContent = ai18n.saveFailed; return; }
-      if (schedCheck.checked && !timeInput.value) { errorMsg.textContent = ai18n.saveFailed; return; }
+      if (!name) { errorMsg.textContent = ai18n.errNameBlank; return; }
+      if (!task) { errorMsg.textContent = ai18n.errTaskBlank; return; }
+      if (freqSelect.value !== 'none' && !timeInput.value) { errorMsg.textContent = ai18n.errSchedule; return; }
 
       var payload = {
         name: name,
-        task: task,
-        notify: { slack: slackCheck.input.checked, email: emailCheck.input.checked },
-        slack_channel: slackCheck.input.checked ? channelInput.value.trim() : ''
+        task: task
       };
-      if (schedCheck.checked) {
-        payload.frequency = freqSelect.value;
+      payload.frequency = freqSelect.value;
+      if (freqSelect.value !== 'none') {
         payload.time = timeInput.value;
         payload.weekday = weekdaySelect.value;
-        payload.day = dayInput.value;
-      } else {
-        payload.frequency = 'none';
+        payload.day = daySelect.value;
       }
 
       saveBtn.disabled = true;
@@ -910,6 +938,5 @@ document.addEventListener('DOMContentLoaded', function () {
     modal.hidden = false;
   }
 
-  if (newAgentBtn) newAgentBtn.addEventListener('click', function () { openAgentForm(null); });
   if (addAgentBtn) addAgentBtn.addEventListener('click', function () { openAgentForm(null); });
 });

@@ -21,6 +21,16 @@
     [label, row]
   end
 
+  # MCP server rows are stored the same way: name|url|token|connected.
+  mcp_rows = Array(settings['mcp_servers']).reject(&:blank?)
+  mcp_options = mcp_rows.map do |row|
+    parts = row.to_s.split('|', 4)
+    label = parts[0].to_s
+    label += "  |  #{parts[1]}" if parts[1].present?
+    label += '  |  ****'        if parts[2].present?
+    [label, row]
+  end
+
   is_mcp_install = agent_helper.mcp_installed?
 %>
 
@@ -58,12 +68,22 @@
   <%= l(:label_redmine_agent_hitl_hint) %>
 </p>
 
+<div class="agent-config-row" style="display:flex; align-items:flex-start; padding:3px 0;">
+  <label for="settings_mcp_servers" style="flex:0 0 295px; width:295px; margin:0 5px 0 0; float:none; text-align:end; font-weight:bold; line-height:24px;"><%= l(:label_agent_mcp_servers) %></label>
+  <div style="flex:1 1 auto; min-width:0;">
+    <%# Posted even when every row is removed, so deleting the last one sticks. %>
+    <%= hidden_field_tag 'settings[mcp_servers][]', '', id: nil %>
+    <%= select_tag 'settings[mcp_servers]',
+          options_for_select(mcp_options),
+          multiple: true, size: 6, id: 'settings_mcp_servers',
+          class: 'multi-row', style: 'display:none;' %>
+    <ul id="settings_mcp_servers_view" class="agents-sortable"></ul>
+  </div>
+</div>
 <p>
-  <label for="settings_slack_bot_token"><strong><%= l(:label_agent_slack_bot_token) %></strong></label>
-  <%= password_field_tag 'settings[slack_bot_token]', settings['slack_bot_token'],
-        id: 'settings_slack_bot_token', autocomplete: 'off',
-        style: 'width:320px; max-width:100%; box-sizing:border-box;' %></br>
-  <%= l(:label_agent_slack_bot_token_hint) %>
+  <%= link_to l(:button_add),    "javascript:showMcpDialog('Add');",  class: 'button' %> |
+  <%= link_to l(:button_edit),   "javascript:showMcpDialog('Edit');", class: 'button' %> |
+  <%= link_to l(:button_delete), "javascript:removeSelectedMcp();",   class: 'button' %>
 </p>
 
 <p>
@@ -179,6 +199,33 @@
   </table>
 </div>
 
+<div id="mcp-dlg" title="<%= l(:label_agent_mcp_servers) %>" style="display:none;">
+  <table style="width:100%; border-spacing:8px 10px; border-collapse:separate; table-layout:fixed;">
+    <tr>
+      <th align="left" style="width:90px; white-space:nowrap; vertical-align:top;"><label><%= l(:label_redmine_agent_name) %></label></th>
+      <td><%= text_field_tag 'mcp_name', '', id: 'mcp_name', style: 'width:100%; box-sizing:border-box;' %></td>
+    </tr>
+    <tr>
+      <th align="left" style="width:90px; white-space:nowrap; vertical-align:top;"><label><%= l(:label_agent_mcp_server_url) %></label></th>
+      <td><%= text_field_tag 'mcp_url', '', id: 'mcp_url', style: 'width:100%; box-sizing:border-box;' %></td>
+    </tr>
+    <tr>
+      <th align="left" style="width:90px; white-space:nowrap; vertical-align:top;"><label><%= l(:label_agent_mcp_token) %></label></th>
+      <td><%= password_field_tag 'mcp_token', '', id: 'mcp_token', autocomplete: 'off', style: 'width:100%; box-sizing:border-box;' %></td>
+    </tr>
+    <tr>
+      <th align="left" style="width:90px; white-space:nowrap; vertical-align:top;"><label><%= l(:label_agent_mcp_connection) %></label></th>
+      <td>
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+          <span id="mcp-conn-status" class="agent-conn-status"></span>
+          <%= link_to l(:label_agent_mcp_test), "javascript:testMcpServer();", id: 'mcp-test-server' %>
+        </div>
+        <span id="mcp-test-status" class="agent-test-status"></span>
+      </td>
+    </tr>
+  </table>
+</div>
+
 <script type="text/javascript">
 //<![CDATA[
 var agentAction = "";
@@ -197,62 +244,163 @@ var LBL_AGENT_NOT_CONNECTED = "<%= escape_javascript(l(:label_redmine_agent_not_
 var AGENT_TEST_URL          = "<%= escape_javascript(url_for(controller: '/redmine_agent', action: 'test_model')) %>";
 var AGENT_CSRF_TOKEN        = "<%= escape_javascript(form_authenticity_token) %>";
 
-function agentListbox() { return document.getElementById("settings_agents"); }
+// Last Test connection verdict for the open MCP dialog.
+var mcpAction = "";
+var mcpConnected = false;
+var LBL_MCP_URL_FIELD = "<%= escape_javascript(l(:label_agent_mcp_server_url)) %>";
+var LBL_MCP_TESTING   = "<%= escape_javascript(l(:label_agent_mcp_testing)) %>";
+var LBL_MCP_TEST_FAIL = "<%= escape_javascript(l(:label_agent_mcp_test_fail)) %>";
+var MCP_TEST_URL      = "<%= escape_javascript(url_for(controller: '/redmine_agent', action: 'test_mcp_server')) %>";
 
-function renderAgentList() {
-  var box = agentListbox();
-  var ul  = document.getElementById("settings_agents_view");
-  if (!box || !ul) { return; }
-  ul.innerHTML = "";
-  for (var i = 0; i < box.options.length; i++) {
-    var li = document.createElement("li");
-    li.className = "agent-item" + (i === box.selectedIndex ? " selected" : "");
-    li.dataset.index = i;
-    li.draggable = true;
+// Shared behaviour for the two config listboxes (LLM configs, MCP servers):
+// render, select, drag-reorder, delete, and post every row back on save.
+// onEdit is what a double-click on a row opens.
+function configList(boxId, viewId, onEdit) {
+  var box = document.getElementById(boxId);
+  var ul  = document.getElementById(viewId);
+  if (!box || !ul) { return null; }
 
-    var text = document.createElement("span");
-    text.className = "agent-text";
-    text.textContent = box.options[i].text;
+  function render() {
+    ul.innerHTML = "";
+    for (var i = 0; i < box.options.length; i++) {
+      var li = document.createElement("li");
+      li.className = "agent-item" + (i === box.selectedIndex ? " selected" : "");
+      li.dataset.index = i;
+      li.draggable = true;
 
-    var handle = document.createElement("span");
-    handle.className = "agent-handle";
-    handle.textContent = "⇅";   // ⇅ up/down arrows — signals the row is draggable
-    handle.setAttribute("aria-hidden", "true");
+      var text = document.createElement("span");
+      text.className = "agent-text";
+      text.textContent = box.options[i].text;
 
-    li.appendChild(text);
-    li.appendChild(handle);   // handle on the right
-    ul.appendChild(li);
+      var handle = document.createElement("span");
+      handle.className = "agent-handle";
+      handle.textContent = "⇅";   // ⇅ up/down arrows — signals the row is draggable
+      handle.setAttribute("aria-hidden", "true");
+
+      li.appendChild(text);
+      li.appendChild(handle);   // handle on the right
+      ul.appendChild(li);
+    }
   }
+
+  function move(from, to) {
+    if (from === to || isNaN(from) || isNaN(to)) { return; }
+    var moving = box.options[from], target = box.options[to];
+    box.insertBefore(moving, from < to ? target.nextSibling : target);
+    box.selectedIndex = Array.prototype.indexOf.call(box.options, moving);
+    render();
+  }
+
+  function remove() {
+    if (box.selectedIndex >= 0) {
+      if (confirm(LBL_AGENT_DELETE)) {
+        for (var i = box.options.length - 1; i >= 0; i--) {
+          if (box.options[i].selected) { box.remove(i); }
+        }
+        render();
+      }
+    } else if (box.options.length > 0) {
+      alert(LBL_AGENT_SELECT);
+    }
+  }
+
+  // A multi-select drops unselected options on submit, so select them all first
+  // to post every row back — in list order.
+  var form = box.form || box.closest("form");
+  if (form) {
+    form.addEventListener("submit", function () {
+      for (var i = 0; i < box.options.length; i++) { box.options[i].selected = true; }
+    });
+  }
+
+  var itemAt = function (e) { return e.target.closest("li.agent-item"); };
+
+  ul.addEventListener("click", function (e) {
+    var li = itemAt(e);
+    if (li) { box.selectedIndex = +li.dataset.index; render(); }
+  });
+  ul.addEventListener("dblclick", function (e) {
+    var li = itemAt(e);
+    if (li) { box.selectedIndex = +li.dataset.index; onEdit(); }
+  });
+
+  // Native HTML5 drag-and-drop reordering.
+  var dragFrom = null, dragLi = null;
+  ul.addEventListener("dragstart", function (e) {
+    var li = itemAt(e);
+    if (!li) { return; }
+    dragFrom = +li.dataset.index;
+    dragLi = li;
+    e.dataTransfer.effectAllowed = "move";
+    // Required for the drag to actually start in Firefox.
+    e.dataTransfer.setData("text/plain", li.dataset.index);
+    setTimeout(function () { li.classList.add("dragging"); }, 0);
+  });
+  ul.addEventListener("dragover", function (e) {
+    e.preventDefault();   // required to allow a drop
+    e.dataTransfer.dropEffect = "move";
+    var li = itemAt(e);
+    for (var i = 0; i < ul.children.length; i++) { ul.children[i].classList.remove("drop-target"); }
+    if (li && li !== dragLi) { li.classList.add("drop-target"); }
+  });
+  ul.addEventListener("drop", function (e) {
+    e.preventDefault();
+    var li = itemAt(e);
+    if (li && dragFrom !== null) { move(dragFrom, +li.dataset.index); }
+    dragFrom = null; dragLi = null;
+  });
+  ul.addEventListener("dragend", function () {
+    dragFrom = null; dragLi = null;
+    for (var i = 0; i < ul.children.length; i++) {
+      ul.children[i].classList.remove("dragging", "drop-target");
+    }
+  });
+
+  render();
+  return { box: box, render: render, remove: remove };
 }
 
-function moveAgent(from, to) {
-  var box = agentListbox();
-  if (!box || from === to || isNaN(from) || isNaN(to)) { return; }
-  var moving = box.options[from], target = box.options[to];
-  box.insertBefore(moving, from < to ? target.nextSibling : target);
-  box.selectedIndex = Array.prototype.indexOf.call(box.options, moving);
-  renderAgentList();
-}
+var agentList = null;
+var mcpList   = null;
 
-// Clear the message under the Test button. Only the connected flag is stored,
+function agentListbox() { return document.getElementById("settings_agents"); }
+function mcpListbox()   { return document.getElementById("settings_mcp_servers"); }
+
+function renderAgentList() { if (agentList) { agentList.render(); } }
+function renderMcpList()   { if (mcpList)   { mcpList.render(); } }
+
+// Clear the message under a Test button. Only the connected flag is stored,
 // so the dialog reopens with the indicator set but no message text.
-function resetAgentTestStatus() {
-  var st = document.getElementById("agent-test-status");
+function resetTestStatus(statusId) {
+  var st = document.getElementById(statusId);
   if (st) { st.textContent = ""; st.className = "agent-test-status"; }
 }
 
-// Green tick / red cross beside the Test button, same icons as the MCP row.
-function setAgentConnected(connected) {
-  agentConnected = !!connected;
-  var el = document.getElementById("agent-conn-status");
+// Green tick / red cross beside a Test button, same icons as the MCP row.
+function setConnStatus(elId, connected) {
+  var el = document.getElementById(elId);
   if (!el) { return; }
-  var path = agentConnected ? "M20 6 L9 17 L4 12" : "M18 6 L6 18 M6 6 L18 18";
-  el.className = "agent-conn-status " + (agentConnected ? "ok" : "fail");
+  var path = connected ? "M20 6 L9 17 L4 12" : "M18 6 L6 18 M6 6 L18 18";
+  el.className = "agent-conn-status " + (connected ? "ok" : "fail");
   el.textContent = "";
   el.insertAdjacentHTML("beforeend",
     '<svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke-linecap="round" ' +
     'stroke-linejoin="round" aria-hidden="true"><path d="' + path + '"/></svg>');
-  el.appendChild(document.createTextNode(agentConnected ? LBL_AGENT_CONNECTED : LBL_AGENT_NOT_CONNECTED));
+  el.appendChild(document.createTextNode(connected ? LBL_AGENT_CONNECTED : LBL_AGENT_NOT_CONNECTED));
+}
+
+function resetAgentTestStatus() { resetTestStatus("agent-test-status"); }
+
+function setAgentConnected(connected) {
+  agentConnected = !!connected;
+  setConnStatus("agent-conn-status", agentConnected);
+}
+
+function resetMcpTestStatus() { resetTestStatus("mcp-test-status"); }
+
+function setMcpConnected(connected) {
+  mcpConnected = !!connected;
+  setConnStatus("mcp-conn-status", mcpConnected);
 }
 
 // Send a sample request to the configured URL/API key and show the result in
@@ -312,6 +460,121 @@ function agentNameExists(box, name, skipIndex) {
   }
   return false;
 }
+
+function mcpMaskedLabel(n, u, t) {
+  var label = n;
+  if (u) { label += "  |  " + u; }
+  if (t) { label += "  |  ****"; }
+  return label;
+}
+
+// Handshake the MCP server and report how many tools it exposes — a reachable
+// server with no tools is still useless to the model.
+function testMcpServer() {
+  var name  = (document.getElementById("mcp_name").value || "").trim();
+  var url   = (document.getElementById("mcp_url").value || "").trim();
+  var token = (document.getElementById("mcp_token").value || "").trim();
+  var st    = document.getElementById("mcp-test-status");
+
+  st.textContent = LBL_MCP_TESTING;
+  st.className = "agent-test-status testing";
+
+  jQuery.ajax({
+    url: MCP_TEST_URL,
+    method: "POST",
+    dataType: "json",
+    data: {
+      name: name,
+      url: url,
+      token: token,
+      authenticity_token: AGENT_CSRF_TOKEN
+    }
+  }).done(function (resp) {
+    if (resp && resp.success) {
+      // Unlike the model test, the tool count is worth showing.
+      st.textContent = resp.message || "";
+      st.className = "agent-test-status";
+      setMcpConnected(true);
+    } else {
+      st.textContent = (resp && resp.message) || LBL_MCP_TEST_FAIL;
+      st.className = "agent-test-status fail";
+      setMcpConnected(false);
+    }
+  }).fail(function (xhr) {
+    var msg = LBL_MCP_TEST_FAIL;
+    try { var j = JSON.parse(xhr.responseText); if (j && j.message) { msg = j.message; } } catch (e) {}
+    st.textContent = msg;
+    st.className = "agent-test-status fail";
+    setMcpConnected(false);
+  });
+}
+
+function ensureMcpDialog() {
+  var $dlg = jQuery("#mcp-dlg");
+  if ($dlg.hasClass("ui-dialog-content")) { return $dlg; }
+  $dlg.dialog({
+    autoOpen: false,
+    resizable: false,
+    modal: false,
+    width: 440,
+    dialogClass: 'agent-config-dialog',
+    buttons: {
+      "Ok": function () {
+        var box   = mcpListbox();
+        var name  = (document.getElementById("mcp_name").value || "").trim();
+        var url   = (document.getElementById("mcp_url").value || "").trim();
+        var token = (document.getElementById("mcp_token").value || "").trim();
+        var editIndex = ("Edit" === mcpAction) ? box.selectedIndex : -1;
+
+        if (name === "") { alert(LBL_AGENT_NAME + " " + LBL_AGENT_INVALID); return; }
+        if (url === "") { alert(LBL_MCP_URL_FIELD + " " + LBL_AGENT_INVALID); return; }
+        if (agentNameExists(box, name, editIndex)) { alert(LBL_AGENT_DUPLICATE); return; }
+
+        var opt;
+        if ("Add" === mcpAction) {
+          opt = document.createElement("option");
+          box.options.add(opt);
+        } else {
+          opt = box.options[box.selectedIndex];
+        }
+        opt.value = [name, url, token, mcpConnected ? "1" : "0"].join("|");
+        opt.text  = mcpMaskedLabel(name, url, token);
+        if ("Add" === mcpAction) { box.selectedIndex = box.options.length - 1; }
+        renderMcpList();
+        jQuery(this).dialog("close");
+      },
+      "Cancel": function () { jQuery(this).dialog("close"); }
+    }
+  });
+  return $dlg;
+}
+
+function showMcpDialog(action) {
+  var box = mcpListbox();
+  var $dlg = ensureMcpDialog();
+  if ("Add" === action) {
+    mcpAction = action;
+    document.getElementById("mcp_name").value = "";
+    document.getElementById("mcp_url").value = "";
+    document.getElementById("mcp_token").value = "";
+    resetMcpTestStatus();
+    setMcpConnected(false);
+    $dlg.dialog("open");
+  } else if ("Edit" === action && box != null && box.selectedIndex >= 0) {
+    mcpAction = action;
+    var parts = box.options[box.selectedIndex].value.split("|");
+    document.getElementById("mcp_name").value  = parts[0] || "";
+    document.getElementById("mcp_url").value   = parts[1] || "";
+    document.getElementById("mcp_token").value = parts[2] || "";
+    resetMcpTestStatus();
+    setMcpConnected(parts[3] === "1");
+    $dlg.dialog("open");
+  } else if (box != null && box.options.length > 0) {
+    alert(LBL_AGENT_SELECT);
+  }
+}
+
+function removeSelectedMcp() { if (mcpList) { mcpList.remove(); } }
 
 // Initialise the jQuery-UI dialog on demand. Doing it here (rather than only on
 // $(document).ready) means it still works even if another plugin's ready
@@ -385,19 +648,7 @@ function showAgentDialog(action) {
   }
 }
 
-function removeSelectedAgent() {
-  var box = agentListbox();
-  if (box != null && box.selectedIndex >= 0) {
-    if (confirm(LBL_AGENT_DELETE)) {
-      for (var i = box.options.length - 1; i >= 0; i--) {
-        if (box.options[i].selected) { box.remove(i); }
-      }
-      renderAgentList();
-    }
-  } else if (box != null && box.options.length > 0) {
-    alert(LBL_AGENT_SELECT);
-  }
-}
+function removeSelectedAgent() { if (agentList) { agentList.remove(); } }
 
 (function () {
   // Editing a connection field invalidates an earlier test, so neither the
@@ -412,63 +663,20 @@ function removeSelectedAgent() {
     }
   });
 
-  var box = agentListbox();
-  var ul  = document.getElementById("settings_agents_view");
-  if (!box || !ul) { return; }
-
-  // A multi-select drops unselected options on submit, so select them all first
-  // to post every row back — in list order.
-  var form = box.form || box.closest("form");
-  if (form) {
-    form.addEventListener("submit", function () {
-      for (var i = 0; i < box.options.length; i++) { box.options[i].selected = true; }
-    });
-  }
-
-  var itemAt = function (e) { return e.target.closest("li.agent-item"); };
-
-  ul.addEventListener("click", function (e) {
-    var li = itemAt(e);
-    if (li) { box.selectedIndex = +li.dataset.index; renderAgentList(); }
-  });
-  ul.addEventListener("dblclick", function (e) {
-    var li = itemAt(e);
-    if (li) { box.selectedIndex = +li.dataset.index; showAgentDialog("Edit"); }
-  });
-
-  // Native HTML5 drag-and-drop reordering.
-  var dragFrom = null, dragLi = null;
-  ul.addEventListener("dragstart", function (e) {
-    var li = itemAt(e);
-    if (!li) { return; }
-    dragFrom = +li.dataset.index;
-    dragLi = li;
-    e.dataTransfer.effectAllowed = "move";
-    // Required for the drag to actually start in Firefox.
-    e.dataTransfer.setData("text/plain", li.dataset.index);
-    setTimeout(function () { li.classList.add("dragging"); }, 0);
-  });
-  ul.addEventListener("dragover", function (e) {
-    e.preventDefault();   // required to allow a drop
-    e.dataTransfer.dropEffect = "move";
-    var li = itemAt(e);
-    for (var i = 0; i < ul.children.length; i++) { ul.children[i].classList.remove("drop-target"); }
-    if (li && li !== dragLi) { li.classList.add("drop-target"); }
-  });
-  ul.addEventListener("drop", function (e) {
-    e.preventDefault();
-    var li = itemAt(e);
-    if (li && dragFrom !== null) { moveAgent(dragFrom, +li.dataset.index); }
-    dragFrom = null; dragLi = null;
-  });
-  ul.addEventListener("dragend", function () {
-    dragFrom = null; dragLi = null;
-    for (var i = 0; i < ul.children.length; i++) {
-      ul.children[i].classList.remove("dragging", "drop-target");
+  ["mcp_url", "mcp_token"].forEach(function (id) {
+    var field = document.getElementById(id);
+    if (field) {
+      field.addEventListener("input", function () {
+        resetMcpTestStatus();
+        setMcpConnected(false);
+      });
     }
   });
 
-  renderAgentList();
+  agentList = configList("settings_agents", "settings_agents_view",
+                         function () { showAgentDialog("Edit"); });
+  mcpList   = configList("settings_mcp_servers", "settings_mcp_servers_view",
+                         function () { showMcpDialog("Edit"); });
 })();
 //]]>
 </script>

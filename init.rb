@@ -1,9 +1,6 @@
 require_relative './lib/agent_hook'
 require_relative './lib/redmine_agent/custom_agents'
 require_relative './lib/redmine_agent/setting_patch'
-require_relative './lib/redmine_agent/slack_notifier'
-require_relative './lib/redmine_agent/email_notifier'
-require_relative './lib/redmine_agent/delivery'
 require_relative './lib/redmine_agent/runner'
 require_relative './lib/redmine_agent/scheduler'
 
@@ -51,23 +48,24 @@ Redmine::Plugin.register :redmine_agent do
   settings(partial: 'settings/redmine_agent_settings', default: {
     # List of configured agents.
     'agents'         => [],
+    # MCP servers the chat can call tools on, pipe-encoded name|url|token|connected.
+    # The built-in Redmine one is derived, not stored here.
+    'mcp_servers'    => [],
     # Free-text instructions appended to the system prompt of every chat request.
     'instructions'   => "Never expose another user's information to non-admin users.\n" \
                         "Reject all delete requests by default.",
     # When enabled, create/update/delete tool calls require manual user approval.
     'human_in_the_loop' => '1',
-    # Custom agents: name/task/schedule/notify, plus a one-time seed flag.
+    # Custom agents: name/task/schedule, plus a one-time seed flag.
     # See RedmineAgent::CustomAgents. Run history lives in the agent_runs
     # table, not here — it is written on every run, which the settings blob
     # is the wrong shape for.
     'custom_agents'        => [],
     'custom_agents_seeded' => '0',
-    # Scheduler: Slack bot token, the user whose API key runs scheduled chats,
-    # and the base URL the scheduler loops back to.
-    'slack_bot_token'      => '',
+    # Scheduler: the user whose API key runs scheduled chats, and the base URL
+    # the scheduler loops back to.
     'run_as_login'         => 'admin',
     'base_url'             => '',
-    'email_subject_prefix' => '[Redmine Agent]',
   })
 
   # Top-bar entry

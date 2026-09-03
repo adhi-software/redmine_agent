@@ -28,7 +28,8 @@ class RedmineAgentController < ApplicationController
 
   before_action :require_login
   before_action :require_admin, only: [
-    :test_model, :custom_agents, :create_agent, :update_agent, :destroy_agent, :run_agent
+    :test_model, :test_mcp_server, :custom_agents, :create_agent, :update_agent,
+    :destroy_agent, :run_agent
   ]
   before_action :set_agent, only: [:index, :chat_request, :history, :clear]
   before_action :sync_agent_menu
@@ -55,6 +56,10 @@ class RedmineAgentController < ApplicationController
 
     @greeting     = l(:label_redmine_agent_greeting, default: 'Hi! How can I help you today?')
     @agent_title  = @agent['name'].presence || l(:label_redmine_agent)
+    # nil on the Query Agent page — there the icon still lists every agent.
+    @current_agent_key = agent_key_param
+    # The zone new schedules are saved in — shown next to the time field.
+    @agent_timezone = default_agent_timezone
 
     @initial_chat = user_chats(User.current, ai_agent_record).first
   end
@@ -63,9 +68,9 @@ class RedmineAgentController < ApplicationController
     message = params[:message].to_s.strip
     return render json: { error: 'Empty message' }, status: :unprocessable_entity if message.blank?
 
-    # No MCP plugin means no tools at all: chat still works, the model just
-    # answers from its own knowledge instead of from Redmine data.
-    mcp_url = mcp_installed? ? mcp_server_url : nil
+    # No server configured means no tools at all: chat still works, the model
+    # just answers from its own knowledge instead of from Redmine data.
+    servers = mcp_servers
 
     @agent_task = @agent['task'].presence
     @agent_name = @agent['name']
@@ -84,18 +89,17 @@ class RedmineAgentController < ApplicationController
         return render_reply(l(:label_agent_action_cancelled), chat, message, provider, settings)
       end
 
-      redmine_api_key = User.current.try(:api_key).presence || ''
-      if greeting_only?(message) || mcp_url.blank?
-        mcp_tools = session_id = mcp_instructions = nil
+      if greeting_only?(message) || servers.empty?
+        mcp_tools = mcp_routes = mcp_instructions = nil
       else
-        mcp_tools, session_id, mcp_instructions = fetch_mcp_tools(mcp_url, redmine_api_key)
-        log_mcp_status(mcp_tools, mcp_url)
+        mcp_tools, mcp_routes, mcp_instructions = fetch_mcp_tools(servers)
+        log_mcp_status(mcp_tools, servers)
         raise l(:label_agent_mcp_tools_failed) if mcp_tools.blank?
       end
 
-      mcp = { tools: mcp_tools, session_id: session_id, instructions: mcp_instructions }
+      mcp = { tools: mcp_tools, routes: mcp_routes, instructions: mcp_instructions }
 
-      result = model_response(settings, mcp_url, message, history, mcp)
+      result = model_response(settings, message, history, mcp)
       chat_message = save_chat_message(message, result, provider, settings, chat)
       render json: result.merge(id: chat_message&.id, chat_id: chat.id)
     rescue => e
@@ -154,6 +158,23 @@ class RedmineAgentController < ApplicationController
     render json: { success: false, message: e.message.presence || l(:label_redmine_agent_test_fail) }
   end
 
+  # Test an MCP server row from the settings popup: handshake, then list tools.
+  # The tool count is the useful signal — a reachable server with no tools is
+  # still useless to the model.
+  def test_mcp_server
+    server = { name: params[:name].to_s.strip.presence || 'mcp', builtin: false,
+               url: params[:url].to_s.strip, token: params[:token].to_s.strip }
+    raise l(:label_agent_mcp_test_fail) if server[:url].blank?
+
+    session_id, _instructions, version = mcp_handshake(server)
+    tools = mcp_tool_list(server, session_id, version)
+    render json: { success: true, tool_count: tools.size,
+                   message: l(:label_agent_mcp_tools_found, count: tools.size) }
+  rescue => e
+    Rails.logger.warn "MCP server test failed: #{e.class}: #{e.message}"
+    render json: { success: false, message: e.message.presence || l(:label_agent_mcp_test_fail) }
+  end
+
   # List the configured AiAgent rows (from the DB) for the mobile sidebar.
   def agents
     agents = AiAgent.active.order(:name).map do |a|
@@ -197,6 +218,7 @@ class RedmineAgentController < ApplicationController
     task = params[:task].to_s.strip
 
     return render json: { error: l(:error_agent_name_blank) }, status: :unprocessable_entity if name.blank?
+    return render json: { error: l(:error_agent_task_blank) }, status: :unprocessable_entity if task.blank?
     return render json: { error: l(:error_agent_name_taken) }, status: :unprocessable_entity if RedmineAgent::CustomAgents.name_taken?(name)
 
     cron = nil
@@ -205,15 +227,10 @@ class RedmineAgentController < ApplicationController
       return render json: { error: l(:error_agent_invalid_schedule) }, status: :unprocessable_entity unless cron
     end
 
-    channel = slack_channel_param
-    return render json: { error: l(:error_agent_invalid_channel) }, status: :unprocessable_entity if channel == :invalid
-
     agent = RedmineAgent::CustomAgents.create(
       'name'          => name,
       'task'          => task,
       'cron'          => cron,
-      'notify'        => notify_params,
-      'slack_channel' => channel,
       'created_by'    => User.current.id
     )
     RedmineAgent::CustomAgents.ai_agent_record(agent)
@@ -232,22 +249,18 @@ class RedmineAgentController < ApplicationController
       return render json: { error: l(:error_agent_name_taken) }, status: :unprocessable_entity if RedmineAgent::CustomAgents.name_taken?(name, except_key: agent['key'])
       attrs['name'] = name
     end
-    attrs['task']    = params[:task].to_s.strip if params.key?(:task)
-    attrs['notify']  = notify_params if params.key?(:notify)
-    attrs['enabled'] = params[:enabled].to_s == 'true' if params.key?(:enabled)
-
-    if params.key?(:slack_channel)
-      channel = slack_channel_param
-      return render json: { error: l(:error_agent_invalid_channel) }, status: :unprocessable_entity if channel == :invalid
-      attrs['slack_channel'] = channel
+    if params.key?(:task)
+      task = params[:task].to_s.strip
+      return render json: { error: l(:error_agent_task_blank) }, status: :unprocessable_entity if task.blank?
+      attrs['task'] = task
     end
-
     if params[:frequency].present?
       attrs['cron'] = params[:frequency].to_s == 'none' ? nil : build_agent_cron(params, agent['cron'])
       return render json: { error: l(:error_agent_invalid_schedule) }, status: :unprocessable_entity if params[:frequency].to_s != 'none' && attrs['cron'].nil?
     end
 
     updated = RedmineAgent::CustomAgents.update(agent['key'], attrs)
+    RedmineAgent::CustomAgents.sync_ai_agent!(updated)
     RedmineAgent::CustomAgents.sync_menu!
     render json: { agent: present_agent(updated), menu: menu_entry(updated) }
   end
@@ -259,9 +272,6 @@ class RedmineAgentController < ApplicationController
     agent = RedmineAgent::CustomAgents.find(key)
     return render json: { error: l(:error_agent_unknown) }, status: :unprocessable_entity unless agent
 
-    if params[:keep_history].to_s != 'true' && agent['ai_agent_id'].present?
-      AiAgent.find_by(id: agent['ai_agent_id'])&.destroy
-    end
     RedmineAgent::CustomAgents.delete(key)
     RedmineAgent::CustomAgents.sync_menu!
     render json: { success: true }
@@ -270,6 +280,8 @@ class RedmineAgentController < ApplicationController
   def run_agent
     agent = RedmineAgent::CustomAgents.find(params[:key].to_s)
     return render json: { error: l(:error_agent_unknown) }, status: :unprocessable_entity unless agent
+    # Would post an empty message and still log an 'ok' run.
+    return render json: { error: l(:error_agent_task_blank) }, status: :unprocessable_entity if agent['task'].blank?
 
     render json: { run: RedmineAgent::Runner.run(agent) }
   end
@@ -296,42 +308,21 @@ class RedmineAgentController < ApplicationController
     @ai_agent_record ||= RedmineAgent::CustomAgents.ai_agent_record(@agent)
   end
 
-  def notify_params
-    n = params[:notify] || {}
-    {
-      'slack' => n[:slack].to_s == 'true',
-      'email' => n[:email].to_s == 'true',
-      'teams' => false,
-      'jira'  => false
-    }
-  end
-
-  # Slack channel names are lowercase, up to 80 chars, and allow - _ . only.
-  # Returns nil for blank (meaning: DM each recipient) or :invalid to reject.
-  SLACK_CHANNEL_RE = /\A#[a-z0-9._-]{1,80}\z/
-
-  def slack_channel_param
-    raw = params[:slack_channel].to_s.strip
-    return nil if raw.blank?
-
-    channel = raw.start_with?('#') ? raw : "##{raw}"
-    SLACK_CHANNEL_RE.match?(channel.downcase) ? channel.downcase : :invalid
-  end
-
   def present_agent(agent)
     {
       key: agent['key'], name: agent['name'], task: agent['task'], cron: agent['cron'],
-      notify: agent['notify'], slack_channel: agent['slack_channel'],
-      enabled: agent['enabled'] != false,
       deletable: agent['key'] != RedmineAgent::CustomAgents::QUERY_AGENT_KEY,
       next_run: (agent['cron'].present? && (c = Fugit::Cron.parse(agent['cron'])) && c.next_time&.to_t&.iso8601),
       last_run: RedmineAgent::CustomAgents.last_run(agent['key'])
     }
   end
 
+  # only_path: in a controller url_for is absolute, but the JS matches this
+  # against the sidebar's rendered href, which is a path.
   def menu_entry(agent)
     { key: agent['key'], name: agent['name'],
-      url: url_for(controller: '/redmine_agent', action: 'index', agent_key: agent['key']) }
+      url: url_for(controller: '/redmine_agent', action: 'index',
+                   agent_key: agent['key'], only_path: true) }
   end
 
   FALLBACK_TIMEZONE = 'Asia/Kolkata'.freeze
@@ -409,81 +400,118 @@ class RedmineAgentController < ApplicationController
     raise last_error
   end
 
-  def fetch_mcp_tools(mcp_url, api_key)
-    return [nil, nil, nil] if mcp_url.blank?
+  MCP_PROTOCOL_VERSION = '2025-03-26'.freeze
 
-    session_id = nil
+  # Handshakes every server and merges their tool lists into one. A server that
+  # fails is logged and skipped, so Slack being down never kills Redmine chat;
+  # only an all-round failure raises. Returns [tools, routes, instructions].
+  def fetch_mcp_tools(servers)
+    tools        = []
+    routes       = {}
+    instructions = []
+    reached      = false
 
-    # Phase 1 — first contact. Any failure here means the server isn't reachable.
-    begin
-      uri  = URI.parse(mcp_url)
-      http = build_http(uri, read_timeout: 15)
-      logger.info("MCP: sending initialize to #{uri}")
-      init_response = mcp_post(http, uri, api_key, session_id, {
-        jsonrpc: '2.0',
-        id:      1,
-        method:  'initialize',
-        params:  {
-          protocolVersion: '2025-03-26',
-          capabilities:    {},
-          clientInfo:      { name: 'redmine-agent', version: '1.0' }
-        }
-      })
-    rescue => e
-      Rails.logger.warn "MCP unreachable: #{e.message}"
-      raise l(:label_agent_mcp_unreachable, url: mcp_url)
-    end
-
-    session_id = init_response['Mcp-Session-Id'] || init_response['mcp-session-id']
-    init_body = JSON.parse(init_response.body) rescue {}
-    mcp_instructions = init_body.dig('result', 'instructions').presence
-    logger.info("MCP: initialized OK, session_id=#{session_id.inspect}, instructions=#{mcp_instructions.present? ? 'yes' : 'none'}")
-
-    # Phase 2 — server is reachable; a failure here means tools couldn't load.
-    begin
-      mcp_post(http, uri, api_key, session_id, { jsonrpc: '2.0', method: 'notifications/initialized' })
-
-      logger.info('MCP: sending tools/list')
-      list_response = mcp_post(http, uri, api_key, session_id, {
-        jsonrpc: '2.0',
-        id:      2,
-        method:  'tools/list',
-        params:  {}
-      })
-
-      body  = JSON.parse(list_response.body)
-      logger.info("MCP tools/list response: #{body.inspect.truncate(500)}")
-      tools = Array(body.dig('result', 'tools'))
-      if tools.empty?
-        logger.warn('MCP: tools/list succeeded but returned no tools')
-        return [nil, session_id, mcp_instructions]
+    Array(servers).each do |server|
+      begin
+        session_id, server_instructions, version = mcp_handshake(server)
+      rescue => e
+        Rails.logger.warn "MCP unreachable (#{server[:name]} #{server[:url]}): #{e.message}"
+        next
       end
 
-      # Raw MCP shape; each provider converts it to its own tool format.
-      [tools, session_id, mcp_instructions]
-    rescue => e
-      Rails.logger.warn "MCP tools fetch failed: #{e.message}"
-      raise l(:label_agent_mcp_tools_failed)
+      reached = true
+      instructions << server_instructions if server_instructions.present?
+
+      server_tools = mcp_tool_list(server, session_id, version)
+      logger.info("MCP #{server[:name]}: #{server_tools.size} tools")
+      next if server_tools.empty?
+
+      server_tools.each do |tool|
+        remote = tool['name'].to_s
+        name   = unique_tool_name(remote, server, routes)
+        routes[name] = server.merge(session_id: session_id, remote_name: remote,
+                                    protocol_version: version,
+                                    write: write_tool_for?(remote, server))
+        tools << tool.merge('name' => name)
+      end
     end
+
+    unless reached
+      raise l(:label_agent_mcp_unreachable, url: Array(servers).map { |s| s[:url] }.join(', '))
+    end
+
+    # Raw MCP shape; each provider converts it to its own tool format.
+    [tools.presence, routes, instructions.join("\n\n").presence]
   end
 
-  # Execute a single MCP tool call.
-  def call_mcp_tool(mcp_url, api_key, session_id, tool_name, arguments)
-    return { error: 'No MCP URL configured' } if mcp_url.blank?
+  # initialize + notifications/initialized.
+  # Returns [session_id, instructions, negotiated protocol version].
+  def mcp_handshake(server)
+    uri  = URI.parse(server[:url])
+    http = build_http(uri, read_timeout: 15)
+    logger.info("MCP: sending initialize to #{uri}")
+    response = mcp_post(http, uri, server[:token], nil, {
+      jsonrpc: '2.0',
+      id:      1,
+      method:  'initialize',
+      params:  {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities:    {},
+        clientInfo:      { name: 'redmine-agent', version: '1.0' }
+      }
+    })
 
-    uri  = URI.parse(mcp_url)
+    session_id   = response['Mcp-Session-Id'] || response['mcp-session-id']
+    body         = mcp_body(response)
+    # Follow the version the server answered with, not the one we asked for.
+    version      = body.dig('result', 'protocolVersion').presence || MCP_PROTOCOL_VERSION
+    instructions = body.dig('result', 'instructions').presence
+    logger.info("MCP #{server[:name]}: protocol=#{version} session=#{session_id.inspect}")
+    mcp_post(http, uri, server[:token], session_id,
+             { jsonrpc: '2.0', method: 'notifications/initialized' },
+             protocol_version: version)
+    [session_id, instructions, version]
+  end
+
+  def mcp_tool_list(server, session_id, version = nil)
+    uri      = URI.parse(server[:url])
+    http     = build_http(uri, read_timeout: 15)
+    response = mcp_post(http, uri, server[:token], session_id,
+                        { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
+                        protocol_version: version)
+    Array(mcp_body(response).dig('result', 'tools'))
+  rescue => e
+    Rails.logger.warn "MCP tools fetch failed (#{server[:name]}): #{e.message}"
+    []
+  end
+
+  # Two servers can expose the same tool name; the later one is prefixed so
+  # both stay callable and each still routes to its own server.
+  def unique_tool_name(name, server, routes)
+    return name unless routes.key?(name)
+
+    prefixed = "#{server[:name].to_s.parameterize(separator: '_')}_#{name}"
+    routes.key?(prefixed) ? "#{prefixed}_#{routes.size}" : prefixed
+  end
+
+  # Execute a single MCP tool call on whichever server exposes it.
+  def call_mcp_tool(routes, tool_name, arguments)
+    route = routes.is_a?(Hash) ? routes[tool_name.to_s] : nil
+    return { error: "Unknown tool #{tool_name}" } unless route
+
+    uri  = URI.parse(route[:url])
     http = build_http(uri, read_timeout: 30)
 
-    call_response = mcp_post(http, uri, api_key, session_id, {
+    call_response = mcp_post(http, uri, route[:token], route[:session_id], {
       jsonrpc: '2.0',
       id:      3,
       method:  'tools/call',
-      params:  { name: tool_name, arguments: arguments }
-    })
+      params:  { name: route[:remote_name], arguments: arguments }
+    }, protocol_version: route[:protocol_version])
 
     return { error: 'Failed to call tool' } unless call_response
 
-    parsed = JSON.parse(call_response.body)
+    parsed = mcp_body(call_response)
     parsed['error'] ? { error: parsed['error'] } : (parsed['result'] || { success: true })
   rescue => e
     Rails.logger.warn "MCP tools/call failed: #{e.message}"
@@ -500,7 +528,13 @@ class RedmineAgentController < ApplicationController
   # Tool names that only read data — never recorded as a completed action.
   READ_TOOL_PREFIXES = %w[get_ list_].freeze
   # Data-changing tools, gated behind user approval when HITL is on.
-  WRITE_TOOL_PREFIXES = %w[create_ update_ delete_].freeze
+  WRITE_TOOL_PREFIXES = %w[create_ update_ delete_ send_ post_].freeze
+  # A configured server (Slack, Teams, ...) acts on an outside system, so
+  # anything there that is not plainly a read is gated — an unrecognised tool
+  # asks for approval rather than firing silently.
+  EXTERNAL_READ_VERBS  = %w[get list read search find fetch view].freeze
+  EXTERNAL_WRITE_VERBS = %w[send post create update delete add remove set write
+                            reply invite upload complete schedule archive rename].freeze
   # Marker on a preview awaiting approval; the JS hangs Approve/Reject off it.
   # The model names the tool; #finalize_reply keeps it only if that tool exists.
   APPROVAL_MARKER = '[AWAITING_APPROVAL]'.freeze
@@ -527,13 +561,38 @@ class RedmineAgentController < ApplicationController
     Setting.plugin_redmine_agent['human_in_the_loop'].to_s == '1'
   end
 
-  def write_tool?(name)
+  # Decided once per tool at fetch time and cached on the route, so the answer
+  # can depend on which server the tool came from.
+  def write_tool_for?(name, server)
+    return WRITE_TOOL_PREFIXES.any? { |p| name.to_s.start_with?(p) } if server[:builtin]
+
+    # The first recognised verb decides, so "create" in slack_create_list wins
+    # over the trailing noun "list" — Slack Lists are objects, not a listing.
+    verb = name.to_s.downcase.split('_').find do |seg|
+      EXTERNAL_READ_VERBS.include?(seg) || EXTERNAL_WRITE_VERBS.include?(seg)
+    end
+    verb.nil? || EXTERNAL_WRITE_VERBS.include?(verb)
+  end
+
+  def write_tool?(name, routes = nil)
+    route = routes.is_a?(Hash) ? routes[name.to_s] : nil
+    return !!route[:write] if route
+
     WRITE_TOOL_PREFIXES.any? { |p| name.to_s.start_with?(p) }
   end
 
   # Write tools from the live MCP list; nothing outside this set is approvable.
-  def available_write_tools(mcp_tools)
-    Array(mcp_tools).map { |t| t['name'].to_s.downcase }.select { |n| write_tool?(n) }
+  def available_write_tools(mcp_tools, routes = nil)
+    Array(mcp_tools).map { |t| t['name'].to_s }
+                    .select { |n| write_tool?(n, routes) }
+                    .map(&:downcase)
+  end
+
+  # Scheduled runs have nobody to approve, so the Runner's own loopback call
+  # skips the gate. Only the configured run-as user may set it.
+  def runner_request?
+    params[:runner].to_s == '1' &&
+      User.current.login == (Setting.plugin_redmine_agent['run_as_login'].to_s.presence || 'admin')
   end
 
   def decision(message)
@@ -575,17 +634,36 @@ class RedmineAgentController < ApplicationController
   end
 
   # Low-level MCP HTTP POST.
-  def mcp_post(http, uri, api_key, session_id, body)
+  def mcp_post(http, uri, api_key, session_id, body, protocol_version: nil)
     req = Net::HTTP::Post.new(uri.request_uri)
     req['Authorization']  = "Bearer #{api_key}"
     req['Content-Type']   = 'application/json'
     req['Accept']         = 'application/json, text/event-stream'
     req['Mcp-Session-Id'] = session_id if session_id.present?
+    # Spec requires this on every request after initialize; some servers answer
+    # 400 without it.
+    req['MCP-Protocol-Version'] = protocol_version if protocol_version.present?
     req.body = body.to_json
 
     response = http.request(req)
-    raise response.message unless response.is_a?(Net::HTTPSuccess)
-    response
+    return response if response.is_a?(Net::HTTPSuccess)
+
+    # The status line alone ("Bad Request") says nothing; the server's JSON-RPC
+    # error does.
+    detail = response.body.to_s.strip.truncate(300).presence
+    raise [response.message, detail].compact.join(' — ')
+  end
+
+  # A streamable-HTTP server may answer with plain JSON or a one-event SSE
+  # stream; in the latter case the payload is the last data: line.
+  def mcp_body(response)
+    raw = response.body.to_s
+    if response['Content-Type'].to_s.include?('text/event-stream')
+      raw = raw.lines.filter_map { |l| l[/\Adata:\s*(.+)\z/, 1] }.last.to_s
+    end
+    JSON.parse(raw)
+  rescue JSON::ParserError
+    {}
   end
 
   # OPENAI-COMPATIBLE — Ollama, OpenAI, Gemini, DeepSeek, Groq, OpenRouter, ...
@@ -594,17 +672,16 @@ class RedmineAgentController < ApplicationController
     provider.to_s.downcase == 'claude'
   end
 
-  def model_response(settings, mcp_url, message, history = [], mcp = {})
+  def model_response(settings, message, history = [], mcp = {})
     provider = settings['type']
     models = resolve_models(settings)
 
-    redmine_api_key = User.current.try(:api_key).presence || ''
-    session_id = mcp[:session_id]
+    routes = mcp[:routes]
 
     provider_tools = claude?(provider) ? convert_tools_for_claude(mcp[:tools]) : convert_tools_for_provider(mcp[:tools])
-    write_tools    = available_write_tools(mcp[:tools])
+    write_tools    = available_write_tools(mcp[:tools], routes)
 
-    system_prompt = system_instructions(mcp[:instructions], tools: mcp_url.present?)
+    system_prompt = system_instructions(mcp[:instructions], tools: mcp[:tools].present?)
 
     try_models(models) do |model|
       messages = if claude?(provider)
@@ -643,7 +720,8 @@ class RedmineAgentController < ApplicationController
 
         # HITL: pause write tools until the user approves (reads still run).
         # Only "Approve" runs the action; "Reject" cancels without re-previewing.
-        if hitl_enabled? && !approved?(message) && tool_calls.any? { |tc| write_tool?(tc[:name]) }
+        if hitl_enabled? && !runner_request? && !approved?(message) &&
+           tool_calls.any? { |tc| write_tool?(tc[:name], routes) }
           awaiting_approval = !rejected?(message)
           note = awaiting_approval ? HITL_NOTE : HITL_CANCEL_NOTE
           if claude?(provider)
@@ -666,7 +744,7 @@ class RedmineAgentController < ApplicationController
               next { type: 'tool_result', tool_use_id: tc[:id], content: { error: err }.to_json, is_error: true }
             end
 
-            result = call_mcp_tool(mcp_url, redmine_api_key, session_id, tc[:name], safe_args)
+            result = call_mcp_tool(routes, tc[:name], safe_args)
             logger.info("Claude tool result (#{tc[:name]}): #{result.inspect.truncate(400)}")
             is_err = tool_result_error?(result)
             had_error = true if is_err
@@ -692,7 +770,7 @@ class RedmineAgentController < ApplicationController
               tool_result = executed_tools[signature]
               logger.info("Reusing cached tool result for #{signature}")
             else
-              tool_result = executed_tools[signature] = call_mcp_tool(mcp_url, redmine_api_key, session_id, tc[:name], safe_args)
+              tool_result = executed_tools[signature] = call_mcp_tool(routes, tc[:name], safe_args)
               ran_new_tool = true
               logger.info("Tool result (#{tc[:name]}): #{tool_result.inspect.truncate(400)}")
             end
@@ -986,7 +1064,7 @@ class RedmineAgentController < ApplicationController
   # (if any), appended to every system prompt.
   def custom_instructions
     admin_text = Setting.plugin_redmine_agent['instructions'].to_s.strip
-    [admin_text, agent_task_block, agent_notify_block].reject(&:blank?).join("\n\n")
+    [admin_text, agent_task_block].reject(&:blank?).join("\n\n")
   end
 
   # Blank for the default Query Agent, so its prompt is unchanged.
@@ -995,20 +1073,6 @@ class RedmineAgentController < ApplicationController
 
     "AGENT TASK\nYou are the \"#{@agent_name}\" agent inside Redmine. Your assigned task, " \
     "which takes precedence over general behaviour (but never over the DATA RULES):\n\n#{@agent_task}"
-  end
-
-  def agent_notify_block
-    return '' if @agent_task.blank?
-
-    <<~PROMPT
-      NOTIFY BLOCK
-      If this task should notify specific people, end your reply with one short summary
-      line followed by exactly one fenced json code block:
-      {"agent_notify_v1": true, "recipients": [{"user_id": 0, "login": "", "mail": ""}], "message": ""}
-      Copy user_id, login and mail only from what the tools returned — never invent them,
-      and leave out anyone whose email you do not have. If there is nothing to notify
-      about, do not write this block at all — plain text is fine.
-    PROMPT
   end
 
   # Date and user facts the model has no other way to know, shared by the
@@ -1170,9 +1234,11 @@ class RedmineAgentController < ApplicationController
     PROMPT
   end
 
-  def log_mcp_status(mcp_tools, mcp_url)
-    logger.info("Fetched #{mcp_tools&.size.to_i} MCP tools.")
-    logger.warn("No MCP tools available — check MCP URL: #{mcp_url.inspect}") if mcp_tools.blank?
+  def log_mcp_status(mcp_tools, servers)
+    logger.info("Fetched #{mcp_tools&.size.to_i} MCP tools from #{Array(servers).size} server(s).")
+    return if mcp_tools.present?
+
+    logger.warn("No MCP tools available — check: #{Array(servers).map { |s| s[:url] }.inspect}")
   end
 
   # Builds the reply shown to the user.
@@ -1202,9 +1268,7 @@ class RedmineAgentController < ApplicationController
     text = text.gsub(APPROVAL_MARKER_RE, '').strip
     text = (pending ? l(:label_agent_approval_prompt) : l(:label_agent_no_reply)) if text.blank?
     text = "#{text}\n\n#{APPROVAL_MARKER}" if pending
-    # The notify block was already lifted out upstream, so re-parsing this text
-    # can never find it again — carry the payload forward.
-    parse_structured_reply(text).merge(notify: reply[:notify])
+    parse_structured_reply(text)
   end
 
   # The tool a preview is waiting on, or nil when we can't run the action. The
