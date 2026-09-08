@@ -120,11 +120,18 @@ class RedmineAgentController < ApplicationController
 
     # Dispatch on the configured type/host only — never on the model name, since
     # OpenRouter serves anthropic/claude-* models over the OpenAI-compatible API.
-    is_claude = (name == 'claude' || server_url.include?('anthropic.com'))
+    is_claude    = (name == 'claude' || server_url.include?('anthropic.com'))
+    is_responses = !is_claude && responses_url?(server_url)
 
-    # Claude's URL is used as entered; the OpenAI-compatible one is normalised
-    # as in the chat path, so the button tests the URL a real request hits.
-    uri  = URI.parse(is_claude ? server_url : chat_completions_url(server_url))
+    # Claude's URL is used as entered; the others are normalised as in the chat
+    # path, so the button tests the URL a real request hits.
+    uri = URI.parse(if is_claude
+                      server_url
+                    elsif is_responses
+                      endpoint_url(server_url, RESPONSES_ENDPOINT)
+                    else
+                      endpoint_url(server_url, CHAT_COMPLETIONS_ENDPOINT)
+                    end)
     http = build_http(uri, read_timeout: 15)
     req  = build_json_post(uri)
 
@@ -135,6 +142,16 @@ class RedmineAgentController < ApplicationController
         model:      model.presence,
         messages:   [{ role: 'user', content: 'ping' }],
         max_tokens: 1
+      }.compact.to_json
+    elsif is_responses
+      req['Authorization'] = "Bearer #{api_key}" if api_key.present?
+      # 16 is the API's floor for max_output_tokens; the reply is thrown away,
+      # only the status code decides the verdict.
+      req.body = {
+        model:             model.presence,
+        input:             'ping',
+        max_output_tokens: 16,
+        store:             false
       }.compact.to_json
     else
       req['Authorization'] = "Bearer #{api_key}" if api_key.present?
@@ -373,11 +390,30 @@ class RedmineAgentController < ApplicationController
 
     _name, model, server_url, api_key, = agents.first.to_s.split('|', 5)
     {
-      'type'       => server_url.to_s.downcase.include?('anthropic') ? 'claude' : 'openai',
+      'type'       => provider_type(server_url),
       'model'      => model.to_s,
       'server_url' => server_url.to_s,
       'api_key'    => api_key.to_s
     }
+  end
+
+  # Which API dialect the configured URL speaks. Decided from the URL alone —
+  # never from the model name, since OpenRouter serves anthropic/claude-* models
+  # over the OpenAI-compatible API.
+  def provider_type(server_url)
+    return 'claude' if server_url.to_s.downcase.include?('anthropic')
+
+    responses_url?(server_url) ? 'responses' : 'openai'
+  end
+
+  # True for OpenAI's Responses API, e.g. https://api.openai.com/v1/responses.
+  # Compares the path only, so a URL carrying a query string (Azure's
+  # ?api-version=...) still matches.
+  def responses_url?(server_url)
+    path = URI.parse(server_url.to_s.strip).path.to_s
+    path.downcase.chomp('/').end_with?('/responses')
+  rescue URI::InvalidURIError
+    false
   end
 
   # Supports a comma-separated list, e.g. "llama3.2:latest, qwen2.5:latest".
@@ -672,19 +708,38 @@ class RedmineAgentController < ApplicationController
     provider.to_s.downcase == 'claude'
   end
 
+  def responses?(provider)
+    provider.to_s.downcase == 'responses'
+  end
+
   def model_response(settings, message, history = [], mcp = {})
     provider = settings['type']
     models = resolve_models(settings)
 
     routes = mcp[:routes]
 
-    provider_tools = claude?(provider) ? convert_tools_for_claude(mcp[:tools]) : convert_tools_for_provider(mcp[:tools])
+    provider_tools = if claude?(provider)
+                       convert_tools_for_claude(mcp[:tools])
+                     elsif responses?(provider)
+                       convert_tools_for_responses(mcp[:tools])
+                     else
+                       convert_tools_for_provider(mcp[:tools])
+                     end
     write_tools    = available_write_tools(mcp[:tools], routes)
 
     system_prompt = system_instructions(mcp[:instructions], tools: mcp[:tools].present?)
 
+    # How a turn asks for an answer instead of another tool call. Dropping the
+    # tools is enough for Chat Completions and Claude, but the Responses API
+    # reads the input's replayed function_call items against the tool list, so
+    # there the list stays and tool_choice is what closes the door.
+    final_tools  = responses?(provider) ? provider_tools : nil
+    final_choice = responses?(provider) ? 'none' : nil
+
     try_models(models) do |model|
-      messages = if claude?(provider)
+      # Claude and the Responses API both carry the system prompt in a field of
+      # their own, so it isn't prepended as a message here.
+      messages = if claude?(provider) || responses?(provider)
                    build_messages(message, include_system: false, history: history)
                  else
                    build_messages(message, system_prompt: system_prompt, history: history)
@@ -700,10 +755,11 @@ class RedmineAgentController < ApplicationController
 
       MAX_TOOL_ITERATIONS.times do |iteration|
         final_pass = (iteration == MAX_TOOL_ITERATIONS - 1)
-        current_tools = final_pass ? nil : provider_tools
+        current_tools = final_pass ? final_tools : provider_tools
 
         begin
-          response = call_provider_api(provider, model, settings, messages, current_tools, system_prompt, iteration: iteration)
+          response = call_provider_api(provider, model, settings, messages, current_tools, system_prompt,
+                                       iteration: iteration, tool_choice: (final_pass ? final_choice : nil))
         rescue UnavailableToolError => e
           logger.warn(e.message)
           unavailable_tool = e.tool_name
@@ -716,7 +772,8 @@ class RedmineAgentController < ApplicationController
         tool_calls = extract_provider_tool_calls(provider, response)
         break if tool_calls.blank?
 
-        messages << format_assistant_message(provider, response)
+        # The Responses API replays several items per turn, the others exactly one.
+        messages.concat(Array.wrap(format_assistant_message(provider, response)))
 
         # HITL: pause write tools until the user approves (reads still run).
         # Only "Approve" runs the action; "Reject" cancels without re-previewing.
@@ -727,7 +784,7 @@ class RedmineAgentController < ApplicationController
           if claude?(provider)
             messages << { role: 'user', content: tool_calls.map { |tc| { type: 'tool_result', tool_use_id: tc[:id], content: note, is_error: true } } }
           else
-            tool_calls.each { |tc| messages << { role: 'tool', tool_call_id: tc[:id], name: tc[:name], content: note } }
+            tool_calls.each { |tc| messages << tool_result_message(provider, tc, note) }
           end
           break
         end
@@ -760,7 +817,7 @@ class RedmineAgentController < ApplicationController
           tool_calls.each do |tc|
             safe_args, err = validate_tool_call(tc[:name], tc[:args])
             if err
-              messages << { role: 'tool', tool_call_id: tc[:id], name: tc[:name], content: { error: err }.to_json }
+              messages << tool_result_message(provider, tc, { error: err }.to_json)
               had_error = true
               next
             end
@@ -779,7 +836,7 @@ class RedmineAgentController < ApplicationController
               completed_actions << tag
             end
 
-            messages << { role: 'tool', tool_call_id: tc[:id], name: tc[:name], content: tool_result.to_json }
+            messages << tool_result_message(provider, tc, tool_result.to_json)
           end
         end
 
@@ -801,7 +858,8 @@ class RedmineAgentController < ApplicationController
       # Resolve the final reply
       primary = stopped_on_error ? '' : extract_provider_text(provider, response)
       reply = resolve_reply(primary, intermediate_text) do
-        forced = call_provider_api(provider, model, settings, messages, nil, system_prompt)
+        forced = call_provider_api(provider, model, settings, messages, final_tools, system_prompt,
+                                   tool_choice: final_choice)
         extract_provider_text(provider, forced)
       end
       # HITL: keep the approval marker only for a write tool that exists — see
@@ -811,7 +869,7 @@ class RedmineAgentController < ApplicationController
     end
   end
 
-  def call_provider_api(provider, model, settings, messages, tools, system_prompt = nil, iteration: 0)
+  def call_provider_api(provider, model, settings, messages, tools, system_prompt = nil, iteration: 0, tool_choice: nil)
     if claude?(provider)
       api_key = settings['api_key'].to_s.strip
       raise 'Claude API key is not configured.' if api_key.blank?
@@ -830,11 +888,36 @@ class RedmineAgentController < ApplicationController
       params[:tools] = tools if tools.present?
 
       claude_request(uri, api_key, params)
+    elsif responses?(provider)
+      server_url = settings['server_url']
+      raise 'Server URL is not configured.' if server_url.blank?
+
+      uri = URI.parse(endpoint_url(server_url, RESPONSES_ENDPOINT))
+
+      # `store: false` keeps the turn stateless: every request replays the whole
+      # input, exactly as the Chat Completions path does, so nothing depends on
+      # a server-side response that may have expired.
+      payload = {
+        model:        model,
+        instructions: system_prompt.presence || system_instructions,
+        input:        messages,
+        stream:       true,
+        store:        false
+      }
+      payload[:tools]       = tools if tools.present?
+      payload[:tool_choice] = tool_choice if tool_choice.present?
+
+      logger.info("→ calling model (#{model}) on the Responses API, iteration #{iteration}")
+      assistant_message = stream_responses_message(uri, payload.to_json,
+                                                   api_key: settings['api_key'].to_s.strip,
+                                                   read_timeout: 500)
+      logger.info("← stream complete")
+      assistant_message
     else
       server_url = settings['server_url']
       raise 'Server URL is not configured.' if server_url.blank?
 
-      uri = URI.parse(chat_completions_url(server_url))
+      uri = URI.parse(endpoint_url(server_url, CHAT_COMPLETIONS_ENDPOINT))
 
       payload = { model: model, messages: messages, stream: true }
       payload[:tools] = tools if tools.present?
@@ -848,22 +931,38 @@ class RedmineAgentController < ApplicationController
     end
   end
 
-  def chat_completions_url(server_url)
-    url = server_url.to_s.strip.chomp('/')
+  # The two endpoints an OpenAI-compatible server exposes.
+  CHAT_COMPLETIONS_ENDPOINT = 'chat/completions'.freeze
+  RESPONSES_ENDPOINT        = 'responses'.freeze
 
-    return url if url.end_with?('/chat/completions')
+  # Roots an endpoint hangs off: a version or vendor prefix such as /v1, /openai
+  # or Gemini's /v1beta/openai.
+  API_ROOT_SUFFIXES = %w[/v1 /openai].freeze
 
-    if url.end_with?('/openai')
-      "#{url}/chat/completions"
-    else
-      "#{url}/v1/chat/completions"
-    end
+  # The URL a request is actually sent to. A URL that already names a path is
+  # used exactly as entered, query string and all — only a bare host or one of
+  # the API roots above is completed, so an endpoint the plugin doesn't
+  # recognise is never guessed at.
+  #
+  #   https://api.openai.com/v1/responses  -> as entered
+  #   https://api.deepseek.com             -> https://api.deepseek.com/v1/chat/completions
+  #   http://localhost:11434/v1            -> http://localhost:11434/v1/chat/completions
+  def endpoint_url(server_url, endpoint)
+    url  = server_url.to_s.strip.chomp('/')
+    path = (URI.parse(url).path.to_s.chomp('/') rescue '')
+
+    return "#{url}/v1/#{endpoint}" if path.empty?
+    return "#{url}/#{endpoint}" if API_ROOT_SUFFIXES.any? { |root| path.end_with?(root) }
+
+    url
   end
 
   def extract_provider_text(provider, response)
     return '' if response.blank?
     if claude?(provider)
       claude_text(Array(response['content']))
+    elsif responses?(provider)
+      responses_text(response)
     else
       response['content'].to_s
     end
@@ -871,7 +970,18 @@ class RedmineAgentController < ApplicationController
 
   def extract_provider_tool_calls(provider, response)
     return [] if response.blank?
-    if claude?(provider)
+    if responses?(provider)
+      responses_output(response, 'function_call').map do |item|
+        args_str = item['arguments'].presence || '{}'
+        args     = normalise_arguments(args_str.is_a?(String) ? JSON.parse(args_str) : args_str)
+        {
+          # call_id, not id: it is what a function_call_output is matched on.
+          id:   item['call_id'],
+          name: item['name'],
+          args: args
+        }
+      end
+    elsif claude?(provider)
       return [] unless response['stop_reason'] == 'tool_use'
       content = Array(response['content'])
       content.select { |b| b['type'] == 'tool_use' }.map do |block|
@@ -899,8 +1009,23 @@ class RedmineAgentController < ApplicationController
   def format_assistant_message(provider, response)
     if claude?(provider)
       { role: 'assistant', content: response['content'] }
+    elsif responses?(provider)
+      # With no stored response to continue from, the assistant's own items are
+      # replayed verbatim — a function_call the input never mentions would leave
+      # its function_call_output an orphan. Reasoning items are dropped: they
+      # arrive without their encrypted content, which the API rejects.
+      responses_output(response, 'message', 'function_call')
     else
       response
+    end
+  end
+
+  # One tool result, in the shape the provider expects to read it back in.
+  def tool_result_message(provider, tool_call, content)
+    if responses?(provider)
+      { type: 'function_call_output', call_id: tool_call[:id], output: content.to_s }
+    else
+      { role: 'tool', tool_call_id: tool_call[:id], name: tool_call[:name], content: content.to_s }
     end
   end
 
@@ -1011,6 +1136,118 @@ class RedmineAgentController < ApplicationController
       rescue *TRANSIENT_HTTP_ERRORS => e
         last_error = e
         logger.warn("OpenAI stream attempt #{i + 1}/#{attempts} failed (#{e.class}: #{e.message}); retrying on a fresh connection.")
+        sleep(0.75 * (i + 1))
+      end
+    end
+    raise last_error
+  end
+
+  # RESPONSES — OpenAI's /v1/responses. Same MCP tool loop as above, but the
+  # request, the reply and the tool results all take a different shape.
+
+  # Raw MCP tool → the Responses function shape, which is flat rather than
+  # nested under "function". strict stays off: it demands every property be
+  # required and additionalProperties be false, which MCP schemas don't promise.
+  def convert_tools_for_responses(mcp_tools)
+    return [] if mcp_tools.blank?
+    mcp_tools.map do |t|
+      {
+        type:        'function',
+        name:        t['name'],
+        description: t['description'],
+        parameters:  t['inputSchema'] || { type: 'object', properties: {} },
+        strict:      false
+      }
+    end
+  end
+
+  # The response's output items of the given types, in the order the model
+  # produced them.
+  def responses_output(response, *types)
+    Array(response['output']).select { |item| types.include?(item['type']) }
+  end
+
+  # Concatenate the text from the assistant's message items.
+  def responses_text(response)
+    responses_output(response, 'message')
+      .flat_map { |item| Array(item['content']) }
+      .select { |part| part['type'] == 'output_text' }
+      .map { |part| part['text'].to_s }
+      .join("\n")
+  end
+
+  # The message carried by a stream's error frame, whichever shape it arrives in.
+  def responses_stream_error(json)
+    json['message'].presence ||
+      (json.dig('response', 'error', 'message') rescue nil).presence ||
+      (json.dig('error', 'message') rescue nil).presence ||
+      'Model stream error'
+  end
+
+  # Stream one Responses turn and return { 'output' => [items] }.
+  #
+  # Only the *.done frames are read: each one carries a finished output item, so
+  # nothing has to be reassembled from the deltas that preceded it.
+  def stream_responses_message(uri, payload_json, read_timeout:, api_key: nil, attempts: 3)
+    last_error = nil
+    attempts.times do |i|
+      items  = {}   # output_index => finished output item
+      buffer = +''
+      begin
+        http = build_http(uri, read_timeout: read_timeout)
+        req  = build_json_post(uri)
+        req['Accept'] = 'text/event-stream'
+        req['Authorization'] = "Bearer #{api_key}" if api_key.present?
+        req.body = payload_json
+
+        http.request(req) do |response|
+          unless response.is_a?(Net::HTTPSuccess)
+            # An error response carries a JSON body, not an SSE stream: report
+            # what the provider said, falling back to the status line.
+            body  = response.read_body.to_s
+            error = (JSON.parse(body) rescue nil)
+            raise (error.dig('error', 'message') rescue nil).presence ||
+                  "The model endpoint returned HTTP #{response.code} #{response.message}."
+          end
+
+          response.read_body do |chunk|
+            buffer << chunk
+            # SSE frames are newline-delimited "data: {...}" lines. The event
+            # name is repeated in the payload's "type", so the event: lines are
+            # skipped along with everything else that isn't data.
+            while (nl = buffer.index("\n"))
+              line = buffer.slice!(0..nl).chomp
+              next unless line.start_with?('data:')
+              data = line.sub(/\Adata:\s*/, '')
+              next if data.empty? || data == '[DONE]'
+
+              json = JSON.parse(data) rescue nil
+              next unless json
+
+              case json['type']
+              when 'response.output_item.done'
+                items[json['output_index'] || items.size] = json['item']
+              when 'response.completed', 'response.incomplete'
+                # The final frame lists every item; prefer it over what was
+                # collected above. An incomplete response (the token cap, a
+                # filter) still carries the part the model did produce.
+                output = Array(json.dig('response', 'output'))
+                items = output.each_with_index.to_h { |item, idx| [idx, item] } if output.any?
+                if json['type'] == 'response.incomplete'
+                  reason = json.dig('response', 'incomplete_details', 'reason')
+                  logger.warn("Responses stream ended incomplete (#{reason || 'no reason given'}).")
+                end
+              when 'error', 'response.failed'
+                raise responses_stream_error(json)
+              end
+            end
+          end
+        end
+
+        return { 'output' => items.keys.sort.map { |k| items[k] }.compact }
+      rescue *TRANSIENT_HTTP_ERRORS => e
+        last_error = e
+        logger.warn("Responses stream attempt #{i + 1}/#{attempts} failed (#{e.class}: #{e.message}); retrying on a fresh connection.")
         sleep(0.75 * (i + 1))
       end
     end
