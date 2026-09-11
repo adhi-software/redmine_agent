@@ -1,12 +1,14 @@
 require_relative './lib/agent_hook'
+require_relative './lib/redmine_agent/app_url'
 require_relative './lib/redmine_agent/custom_agents'
-require_relative './lib/redmine_agent/setting_patch'
 require_relative './lib/redmine_agent/runner'
 require_relative './lib/redmine_agent/scheduler'
 
-Rails.application.config.after_initialize do
-  RedmineAgent::SettingPatch.apply!
+# Keeps LLM/MCP secrets out of production.log; mutated in place — env_config caches this array.
+filters = Rails.application.config.filter_parameters
+[:api_key, :mcp_token, :agents, :mcp_servers].each { |p| filters << p unless filters.include?(p) }
 
+Rails.application.config.after_initialize do
   # ERPmine overrides render_main_menu but introduces a bug: it ignores the
   # controller.current_menu and hardcodes its own menu_name() logic.
   # We patch render_main_menu to force it to render our :agent_menu when
@@ -25,7 +27,7 @@ Rails.application.config.after_initialize do
           if params[:controller] == 'redmine_agent'
             RedmineAgent::CustomAgents.sync_menu!
             html = render_menu(:agent_menu, project)
-            html = safe_join([html, render(partial: 'redmine_agent/agent_menu_actions')]) if User.current.admin?
+            html = safe_join([html, render(partial: 'redmine_agent/agent_menu_actions')]) if User.current.logged?
             html
           else
             _org_render_main_menu_agent(project)
@@ -56,21 +58,16 @@ Redmine::Plugin.register :redmine_agent do
                         "Reject all delete requests by default.",
     # When enabled, create/update/delete tool calls require manual user approval.
     'human_in_the_loop' => '1',
-    # Custom agents: name/task/schedule, plus a one-time seed flag.
-    # See RedmineAgent::CustomAgents. Run history lives in the agent_runs
-    # table, not here — it is written on every run, which the settings blob
-    # is the wrong shape for.
-    'custom_agents'        => [],
-    'custom_agents_seeded' => '0',
-    # Scheduler: the user whose API key runs scheduled chats, and the base URL
-    # the scheduler loops back to.
-    'run_as_login'         => 'admin',
-    'base_url'             => '',
+    # Agents (name/task/schedule) live in the ai_agents table and their runs in
+    # ai_agent_runs — see RedmineAgent::CustomAgents. Nothing agent-shaped is
+    # stored here: the settings blob is a single read-modify-write row.
+    # A scheduled run acts as the agent's creator, so there is no run-as
+    # setting, and the URL it loops back to comes from Settings > General.
   })
 
   # Top-bar entry
   menu :top_menu, :ai_agent, { controller: 'redmine_agent', action: 'index' },
-       caption: :label_redmine_agent,
+       caption: :label_agent_top_menu,
        if: Proc.new { User.current.logged? }
 
   # The left-nav (:agent_menu) itself is populated dynamically at request
@@ -80,4 +77,7 @@ end
 
 Rails.application.config.after_initialize do
   RedmineAgent::Scheduler.start!
+  # A Puma cluster forks after this: the worker inherits no threads, and the
+  # claim's unique index keeps several workers from doubling up on a run.
+  ActiveSupport::ForkTracker.after_fork { RedmineAgent::Scheduler.start! } if defined?(ActiveSupport::ForkTracker)
 end

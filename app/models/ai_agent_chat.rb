@@ -32,5 +32,4 @@ class AiAgentChat < ActiveRecord::Base
   # SQL Server store whole seconds / 3.33 ms steps, so created_at alone is not
   # a stable sort there.
   scope :recent_first, -> { order(created_at: :desc, id: :desc) }
-  scope :oldest_first, -> { order(created_at: :asc, id: :asc) }
 end

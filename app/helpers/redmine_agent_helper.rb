@@ -21,6 +21,8 @@ module RedmineAgentHelper
     table thead tbody tr th td h1 h2 h3 h4 h5 h6 blockquote hr
   ].freeze
   ALLOWED_HTML_ATTRS = { 'a' => %w[href title] }.freeze
+  # The history panel's window; a page asks for the few it actually renders.
+  MAX_CHATS = 500
 
   def render_markdown(text)
     text = text.to_s
@@ -59,10 +61,14 @@ module RedmineAgentHelper
       markdown: cleaned }
   end
 
-  def user_chats(user, ai_agent = nil)
+  # Ordering before the limit is what makes which chats come back
+  # deterministic; an empty one must not use up the window either.
+  def user_chats(user, ai_agent = nil, limit: MAX_CHATS)
     chats = AiAgentChat.for_user(user)
+                       .where(id: AiChatMessage.select(:chat_id))
+                       .recent_first
                        .includes(:ai_chat_messages)
-                       .limit(500)
+                       .limit(limit)
     chats = chats.for_agent(ai_agent) if ai_agent
 
     result = chats.filter_map do |chat|
@@ -118,7 +124,7 @@ module RedmineAgentHelper
     servers = []
     if mcp_installed?
       servers << { name: 'redmine', builtin: true,
-                   url: "#{Setting.protocol}://#{Setting.host_name}".chomp('/') + '/mcp',
+                   url: RedmineAgent::AppUrl.base + '/mcp',
                    token: User.current.try(:api_key).to_s }
     end
     servers + configured_mcp_servers

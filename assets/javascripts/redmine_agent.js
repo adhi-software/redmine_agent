@@ -6,17 +6,20 @@ document.addEventListener('DOMContentLoaded', function () {
   var input = document.getElementById('agent-chat-input');
   var sendBtn = document.getElementById('agent-chat-send');
   var messages = document.getElementById('agent-chat-messages');
+  var chatArea = document.getElementById('agent-chat-area');
   var newBtn = document.getElementById('agent-new-chat');
   var historyBtn = document.getElementById('agent-history-chat');
   var historyPanel = document.getElementById('agent-history-panel');
   var historyList = document.getElementById('agent-history-list');
   var historyClose = document.getElementById('agent-history-close');
   var clearBtn = document.getElementById('agent-clear-chat');
+  // Set on a scheduled agent's page, blank on the Query Agent's. A scheduled
+  // agent's page shows its whole history and has no chat buttons at all.
+  var currentAgentKey = page.getAttribute('data-current-agent-key') || '';
   var busy = false;
   var chatUrl = page.getAttribute('data-chat-url');
   var historyUrl = page.getAttribute('data-history-url');
   var clearUrl = page.getAttribute('data-clear-url');
-  var greeting = page.getAttribute('data-greeting');
   var hitlEnabled = page.getAttribute('data-hitl') === '1';
   var csrfToken = document.querySelector('meta[name="csrf-token"]');
 
@@ -27,15 +30,22 @@ document.addEventListener('DOMContentLoaded', function () {
     deleteTitle: page.getAttribute('data-i18n-delete-title'),
     deleteConfirm: page.getAttribute('data-i18n-delete-confirm'),
     deleteError: page.getAttribute('data-i18n-delete-error'),
+    clearConfirm: page.getAttribute('data-i18n-clear-confirm'),
     unreachable: page.getAttribute('data-i18n-unreachable'),
     approvalApprove: page.getAttribute('data-i18n-approval-approve'),
-    approvalReject: page.getAttribute('data-i18n-approval-reject')
+    approvalReject: page.getAttribute('data-i18n-approval-reject'),
+    runFailed: page.getAttribute('data-i18n-run-failed')
   };
 
   var currentChatId = null;
 
   function setHasMessages(state) {
     if (clearBtn) clearBtn.disabled = !state;
+  }
+
+  // Empty chat: CSS floats the composer to the middle of the area.
+  function setComposerCentered(on) {
+    if (form && chatArea) chatArea.classList.toggle('agent-chat-empty', on);
   }
 
   function newChatId() {
@@ -46,18 +56,79 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
-  (function initChat() {
-    var el = document.getElementById('agent-initial-chat');
-    var chat = null;
+  (function initTimeline() {
+    var el = document.getElementById('agent-initial-chats');
+    var data = null;
     if (el) {
-      try { chat = JSON.parse(el.textContent); } catch (e) { chat = null; }
+      try { data = JSON.parse(el.textContent); } catch (e) { data = null; }
     }
-    if (chat) {
-      loadChat(chat);
-    } else {
-      currentChatId = newChatId();
-    }
+    loadTimeline(data || {});
   })();
+
+  // Everything this page has to show, oldest at the top: one block per chat,
+  // plus the runs that failed before reaching the chat. Typing continues the
+  // newest chat, as it always has.
+  function loadTimeline(data) {
+    var chats = data.chats || [];
+    var last = chats[chats.length - 1] || null;
+    var entries = chats.map(function (chat) { return { at: chat.created_at, chat: chat }; })
+      .concat((data.failed_runs || []).map(function (run) { return { at: run.at, run: run }; }));
+    // ISO 8601 stamps, so a plain string compare is chronological.
+    entries.sort(function (a, b) { return String(a.at).localeCompare(String(b.at)); });
+
+    messages.innerHTML = '';
+    entries.forEach(function (entry) {
+      messages.appendChild(entry.chat ? buildChatBlock(entry.chat, entry.chat === last)
+                                      : buildRunErrorBlock(entry.run));
+    });
+
+    currentChatId = last ? last.chat_id : newChatId();
+    // A scheduled agent's clear takes the whole page, failed runs included.
+    setHasMessages(currentAgentKey ? entries.length > 0 : !!last);
+    if (!entries.length) showWelcome();
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  // isCurrent: only the newest chat's last reply can still be awaiting approval.
+  function buildChatBlock(chat, isCurrent) {
+    var block = document.createElement('div');
+    block.className = 'agent-chat-block';
+    if (currentAgentKey) block.appendChild(runSeparator(chat.created_at));
+
+    var exchanges = chat.exchanges || [];
+    exchanges.forEach(function (ex, index) {
+      appendMessage(ex.request, 'user', block);
+      renderAgentResponse({ type: 'html', html: ex.html, reply: ex.reply },
+                          isCurrent && index === exchanges.length - 1, block);
+    });
+    return block;
+  }
+
+  // Every scheduled run is a chat of its own, so the page marks where each one
+  // starts. Clearing is all-or-nothing, from the header.
+  function runSeparator(at) {
+    var sep = document.createElement('div');
+    sep.className = 'agent-run-sep';
+
+    var label = document.createElement('span');
+    label.className = 'agent-run-sep-label';
+    label.textContent = at ? shortStamp(at) : '';
+    sep.appendChild(label);
+    return sep;
+  }
+
+  // A run that failed never said anything, so its entry is just the reason.
+  function buildRunErrorBlock(run) {
+    var block = document.createElement('div');
+    block.className = 'agent-chat-block';
+    block.appendChild(runSeparator(run.at));
+
+    var line = document.createElement('div');
+    line.className = 'agent-run-error';
+    line.textContent = i18n.runFailed + (run.error ? ': ' + run.error : '');
+    block.appendChild(line);
+    return block;
+  }
 
   // ── New chat button ──
   if (newBtn) {
@@ -74,8 +145,6 @@ document.addEventListener('DOMContentLoaded', function () {
     historyBtn.addEventListener('click', function (e) {
       e.stopPropagation();
       if (historyPanel.hidden) {
-        // Both popups sit in the same spot, so only one can be open.
-        hideAgentsPanel();
         loadHistory();
         historyPanel.hidden = false;
       } else {
@@ -89,13 +158,13 @@ document.addEventListener('DOMContentLoaded', function () {
 
   // Close the history popup when clicking anywhere outside it.
   document.addEventListener('click', function (e) {
-    if (historyPanel.hidden) return;
+    if (!historyPanel || historyPanel.hidden) return;
     if (historyPanel.contains(e.target)) return;
     hideHistoryPanel();
   });
 
   function hideHistoryPanel() {
-    historyPanel.hidden = true;
+    if (historyPanel) historyPanel.hidden = true;
   }
 
   function loadHistory() {
@@ -189,24 +258,19 @@ document.addEventListener('DOMContentLoaded', function () {
 
   function loadChat(chat) {
     hideHistoryPanel();
+    setComposerCentered(false);
     messages.innerHTML = '';
-    clearWelcome();
-    var exchanges = chat.exchanges || [];
-    exchanges.forEach(function (ex, index) {
-      appendMessage(ex.request, 'user');
-      var isLast = (index === exchanges.length - 1);
-      renderAgentResponse({ type: 'html', html: ex.html, reply: ex.reply }, isLast);
-    });
+    messages.appendChild(buildChatBlock(chat, true));
     currentChatId = chat.chat_id;
     setHasMessages(true);
   }
 
-  // ── Delete (current chat) button ──
+  // ── Delete button: one chat here, a scheduled agent's whole log there ──
   if (clearBtn) {
     clearBtn.addEventListener('click', function () {
       if (clearBtn.disabled) return;
-      if (!window.confirm(i18n.deleteConfirm)) return;
-      deleteCurrentChat();
+      if (!window.confirm(currentAgentKey ? i18n.clearConfirm : i18n.deleteConfirm)) return;
+      if (currentAgentKey) clearAllChats(); else deleteCurrentChat();
     });
   }
 
@@ -230,12 +294,31 @@ document.addEventListener('DOMContentLoaded', function () {
       });
   }
 
+  // Wipes this agent's whole history — every chat and its run log.
+  function clearAllChats() {
+    fetch(clearUrl, {
+      method: 'DELETE',
+      headers: jsonHeaders(),
+      body: JSON.stringify({ all: '1' })
+    })
+      .then(function (res) { return res.json(); })
+      .then(function () {
+        clearChat();
+        currentChatId = newChatId();
+        setHasMessages(false);
+      })
+      .catch(function () {
+        window.alert(i18n.deleteError);
+      });
+  }
+
   function clearChat() {
     messages.innerHTML = '';
     showWelcome();
   }
 
   function showWelcome() {
+    setComposerCentered(true);
     if (messages.querySelector('.agent-welcome')) return;
     var div = document.createElement('div');
     div.className = 'agent-welcome';
@@ -257,16 +340,17 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   function clearWelcome() {
+    setComposerCentered(false);
     var w = messages.querySelector('.agent-welcome');
     if (w) w.remove();
   }
 
-  function appendMessage(text, sender) {
+  function appendMessage(text, sender, target) {
     clearWelcome();
     var el = document.createElement('div');
     el.className = 'redmine-agent-msg ' + sender;
     el.textContent = text;
-    messages.appendChild(el);
+    (target || messages).appendChild(el);
     messages.scrollTop = messages.scrollHeight;
   }
 
@@ -285,7 +369,7 @@ document.addEventListener('DOMContentLoaded', function () {
     return (text || '').replace(/\[\s*AWAITING_APPROVAL[^\]]*\]/gi, '');
   }
 
-  function renderAgentResponse(data, isLast) {
+  function renderAgentResponse(data, isLast, target) {
     if (isLast === undefined) isLast = true;
     clearWelcome();
     var el = document.createElement('div');
@@ -310,7 +394,7 @@ document.addEventListener('DOMContentLoaded', function () {
       el.textContent = stripApprovalMarker(data.reply).trim();
     }
 
-    messages.appendChild(el);
+    (target || messages).appendChild(el);
     messages.scrollTop = messages.scrollHeight;
   }
 
@@ -379,7 +463,7 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   function updateSendButton() {
-    if (sendBtn) sendBtn.disabled = busy || input.value.trim() === '';
+    if (sendBtn && input) sendBtn.disabled = busy || input.value.trim() === '';
   }
 
   function setBusy(state) {
@@ -419,58 +503,66 @@ document.addEventListener('DOMContentLoaded', function () {
     input.style.height = Math.min(input.scrollHeight, 160) + 'px';
   }
 
-  input.addEventListener('input', function () {
-    updateSendButton();
-    autoGrowInput();
-  });
+  // A scheduled agent's page renders no composer, so there is nothing to wire.
+  if (input && form) {
+    input.addEventListener('input', function () {
+      updateSendButton();
+      autoGrowInput();
+    });
 
-  // Enter submits; Shift+Enter (or Ctrl/Cmd+Enter) inserts a newline.
-  input.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.isComposing) {
-      e.preventDefault();
-      if (typeof form.requestSubmit === 'function') {
-        form.requestSubmit();
-      } else {
-        form.dispatchEvent(new Event('submit', { cancelable: true }));
+    // Enter submits; Shift+Enter (or Ctrl/Cmd+Enter) inserts a newline.
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.isComposing) {
+        e.preventDefault();
+        if (typeof form.requestSubmit === 'function') {
+          form.requestSubmit();
+        } else {
+          form.dispatchEvent(new Event('submit', { cancelable: true }));
+        }
       }
-    }
-  });
+    });
 
-  form.addEventListener('submit', function (e) {
-    e.preventDefault();
-    if (busy) return;
-    var text = input.value.trim();
-    if (!text) return;
-    appendMessage(text, 'user');
-    input.value = '';
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      if (busy) return;
+      var text = input.value.trim();
+      if (!text) return;
+      appendMessage(text, 'user');
+      input.value = '';
+      updateSendButton();
+      autoGrowInput();
+      sendMessage(text);
+    });
+
     updateSendButton();
-    autoGrowInput();
-    sendMessage(text);
-  });
+  }
 
-  updateSendButton();
-
-  // ── Agent management (admin only) ──
+  // ── Agent management (your own agents) ──
   var customAgentsUrl = page.getAttribute('data-custom-agents-url');
   if (!customAgentsUrl) return;
 
-  var manageBtn = document.getElementById('agent-manage-agents');
-  var agentsPanel = document.getElementById('agent-agents-panel');
-  var agentsList = document.getElementById('agent-agents-list');
-  var agentsClose = document.getElementById('agent-agents-close');
+  var editAgentBtn = document.getElementById('agent-edit-agent');
+  // A run is over in seconds normally; the cap covers the runner's own timeout.
+  var RUN_POLL_MS  = 2000;
+  var RUN_POLL_MAX = 155;
+
+  var runAgentBtn = document.getElementById('agent-run-agent');
+  var deleteAgentBtn = document.getElementById('agent-delete-agent');
   var addAgentBtn = document.getElementById('agent-add-agent');
 
   var ai18n = {
-    agentsTitle: page.getAttribute('data-i18n-agents-title'),
-    noAgents: page.getAttribute('data-i18n-no-agents'),
     editAgent: page.getAttribute('data-i18n-edit-agent'),
     addAgent: page.getAttribute('data-i18n-add-agent'),
     agentName: page.getAttribute('data-i18n-agent-name'),
     agentTask: page.getAttribute('data-i18n-agent-task'),
     agentTaskHint: page.getAttribute('data-i18n-agent-task-hint'),
+    notifyChannels: page.getAttribute('data-notify-channels'),
     agentSchedule: page.getAttribute('data-i18n-agent-schedule'),
     freqLabel: page.getAttribute('data-i18n-schedule-frequency'),
     freqNone: page.getAttribute('data-i18n-schedule-none'),
+    freqHourly: page.getAttribute('data-i18n-schedule-hourly'),
+    everyLabel: page.getAttribute('data-i18n-schedule-every'),
+    hoursLabel: page.getAttribute('data-i18n-schedule-hours'),
     freqDaily: page.getAttribute('data-i18n-schedule-daily'),
     freqWeekdays: page.getAttribute('data-i18n-schedule-weekdays'),
     freqWeekly: page.getAttribute('data-i18n-schedule-weekly'),
@@ -485,10 +577,10 @@ document.addEventListener('DOMContentLoaded', function () {
     saveFailed: page.getAttribute('data-i18n-save-failed'),
     cancel: page.getAttribute('data-i18n-cancel'),
     deleteAgentConfirm: page.getAttribute('data-i18n-delete-agent-confirm'),
+    deleteAgent: page.getAttribute('data-i18n-delete-agent'),
+    clearLog: page.getAttribute('data-i18n-clear-log'),
     runNow: page.getAttribute('data-i18n-run-now'),
     running: page.getAttribute('data-i18n-running'),
-    neverRun: page.getAttribute('data-i18n-never-run'),
-    lastRun: page.getAttribute('data-i18n-last-run'),
     timezone: page.getAttribute('data-i18n-schedule-timezone'),
     dayNames: (page.getAttribute('data-i18n-day-names') || '').split(','),
     errNameBlank: page.getAttribute('data-i18n-error-name-blank'),
@@ -503,166 +595,68 @@ document.addEventListener('DOMContentLoaded', function () {
     return { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken ? csrfToken.content : '' };
   }
 
-  function hideAgentsPanel() {
-    if (agentsPanel) agentsPanel.hidden = true;
-  }
-
-  // Set on a custom agent's own page: the icon edits that agent instead of
-  // listing every agent. Blank on the Query Agent page.
-  var currentAgentKey = page.getAttribute('data-current-agent-key') || '';
-
-  function toggleAgentsPanel() {
-    if (agentsPanel.hidden) {
-      hideHistoryPanel();
-      loadAgentsList();
-      agentsPanel.hidden = false;
-    } else {
-      hideAgentsPanel();
-    }
-  }
-
-  if (manageBtn) {
-    manageBtn.addEventListener('click', function (e) {
-      e.stopPropagation();
-      toggleAgentsPanel();
-    });
-  }
-  if (agentsClose) agentsClose.addEventListener('click', hideAgentsPanel);
-
-  document.addEventListener('click', function (e) {
-    if (!agentsPanel || agentsPanel.hidden) return;
-    if (agentsPanel.contains(e.target) || (manageBtn && manageBtn.contains(e.target))) return;
-    hideAgentsPanel();
-  });
-
-  function loadAgentsList() {
-    agentsList.innerHTML = '';
-    agentsList.appendChild(emptyRow(i18n.loading));
+  // Fetched fresh so the form always opens on what is stored.
+  function withAgent(key, callback) {
     fetch(customAgentsUrl, { headers: { 'Accept': 'application/json' } })
       .then(function (res) { return res.json(); })
-      .then(function (data) { renderAgentsList(data.agents || []); })
-      .catch(function () {
-        agentsList.innerHTML = '';
-        agentsList.appendChild(emptyRow(i18n.historyError));
+      .then(function (data) {
+        var agent = (data.agents || []).filter(function (a) { return a.key === key; })[0];
+        if (agent) callback(agent);
       });
   }
 
-  function renderAgentsList(agents) {
-    agentsList.innerHTML = '';
-    // The icon only exists on an agent's own page, so it lists just that agent.
-    if (currentAgentKey) {
-      agents = agents.filter(function (a) { return a.key === currentAgentKey; });
-    }
-    if (!agents.length) {
-      agentsList.appendChild(emptyRow(ai18n.noAgents));
-      return;
-    }
-    agents.forEach(function (agent) { agentsList.appendChild(buildAgentRow(agent)); });
+  if (editAgentBtn) {
+    editAgentBtn.addEventListener('click', function () { withAgent(currentAgentKey, openAgentForm); });
   }
 
-  // Runs migrated from the old settings-blob log have no started_at, and carry
-  // the reason inside status ("error: Errno::ECONNREFUSED") instead of in error.
-  function runFailed(run) {
-    return !!run && /^error/i.test(String(run.status || ''));
+  // Every agent can be run on demand - a schedule is not what makes it runnable.
+  if (runAgentBtn) {
+    runAgentBtn.addEventListener('click', function () {
+      runAgentBtn.disabled = true;
+      runAgentBtn.title = ai18n.running;
+      fetch(customAgentsUrl + '/' + currentAgentKey + '/run', { method: 'POST', headers: jsonHeaders() })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          if (!data || !data.run_id) throw new Error('run not started');
+          pollRun(currentAgentKey, data.run_id, 0, function () { window.location.reload(); });
+        })
+        .catch(function () {
+          runAgentBtn.disabled = false;
+          runAgentBtn.title = ai18n.runNow;
+        });
+    });
   }
 
-  // Seconds are noise here, and the panel is narrow enough that they wrap the row.
+  // The run happens in the background, so the caller waits for its log row to
+  // leave 'started' before showing what it wrote.
+  function pollRun(key, runId, attempt, done) {
+    if (attempt >= RUN_POLL_MAX) { done(); return; }
+
+    window.setTimeout(function () {
+      fetch(customAgentsUrl + '/' + key + '/runs', { headers: jsonHeaders() })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          var match = (data.runs || []).filter(function (run) { return run.id === runId; })[0];
+          if (match && match.status !== 'started') { done(); return; }
+          pollRun(key, runId, attempt + 1, done);
+        })
+        .catch(function () { done(); });
+    }, RUN_POLL_MS);
+  }
+
+  if (deleteAgentBtn) {
+    deleteAgentBtn.addEventListener('click', function () {
+      if (!window.confirm(ai18n.deleteAgentConfirm)) return;
+      fetch(customAgentsUrl + '/' + currentAgentKey, { method: 'DELETE', headers: jsonHeaders() })
+        .then(function (r) { return r.json(); })
+        // This page goes with the agent; the bare URL is the Query Agent's.
+        .then(function () { window.location.href = window.location.pathname; });
+    });
+  }
+
+  // Seconds are noise on a run separator.
   function shortStamp(value) {
     return new Date(value).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
-  }
-
-  function lastRunText(run) {
-    if (!run) return ai18n.neverRun;
-    var when = run.started_at ? shortStamp(run.started_at) : '';
-    var parts = [when, run.status].filter(function (p) { return p; });
-    return ai18n.lastRun + (parts.length ? ': ' + parts.join(' · ') : '');
-  }
-
-  function buildAgentRow(agent) {
-    var row = document.createElement('div');
-    row.className = 'agent-history-item agent-agent-item';
-
-    var body = document.createElement('div');
-    body.className = 'agent-history-item-body';
-
-    var name = document.createElement('div');
-    name.className = 'agent-history-item-request';
-    name.textContent = agent.name;
-
-    var meta = document.createElement('div');
-    meta.className = 'agent-history-item-time';
-    var bits = [];
-    if (agent.cron) bits.push(agent.next_run ? shortStamp(agent.next_run) : ai18n.runNow);
-    meta.textContent = bits.join(' · ');
-
-    // Its own line: the column is too narrow to keep this inline without the
-    // label wrapping away from its value.
-    var lastRun = document.createElement('div');
-    lastRun.className = 'agent-history-item-time';
-    lastRun.textContent = lastRunText(agent.last_run);
-    if (runFailed(agent.last_run)) {
-      lastRun.classList.add('agent-run-failed');
-      // The full message only fits in a tooltip.
-      if (agent.last_run.error) lastRun.title = agent.last_run.error;
-    }
-
-    body.appendChild(name);
-    if (bits.length) body.appendChild(meta);
-    body.appendChild(lastRun);
-    body.addEventListener('click', function () { openAgentForm(agent); });
-
-    var actions = document.createElement('div');
-    actions.className = 'agent-agent-actions';
-
-    var editBtn = document.createElement('button');
-    editBtn.type = 'button';
-    editBtn.className = 'agent-agent-action-btn';
-    editBtn.textContent = ai18n.editAgent;
-    editBtn.addEventListener('click', function (e) { e.stopPropagation(); openAgentForm(agent); });
-    actions.appendChild(editBtn);
-
-    // Every agent can be run on demand — a schedule is not what makes it runnable.
-    var runBtn = document.createElement('button');
-    runBtn.type = 'button';
-    runBtn.className = 'agent-agent-action-btn';
-    runBtn.textContent = ai18n.runNow;
-    runBtn.addEventListener('click', function (e) {
-      e.stopPropagation();
-      runBtn.disabled = true;
-      runBtn.textContent = ai18n.running;
-      fetch(customAgentsUrl + '/' + agent.key + '/run', { method: 'POST', headers: jsonHeaders() })
-        .then(function (r) { return r.json(); })
-        // Reloading shows the run that just finished, and its status.
-        .then(function () { loadAgentsList(); })
-        .catch(function () { runBtn.disabled = false; runBtn.textContent = ai18n.runNow; });
-    });
-    actions.appendChild(runBtn);
-
-    if (agent.deletable) {
-      var delBtn = document.createElement('button');
-      delBtn.type = 'button';
-      delBtn.className = 'agent-history-item-delete';
-      delBtn.title = i18n.deleteTitle;
-      delBtn.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>';
-      delBtn.addEventListener('click', function (e) {
-        e.stopPropagation();
-        if (!window.confirm(ai18n.deleteAgentConfirm)) return;
-        fetch(customAgentsUrl + '/' + agent.key, { method: 'DELETE', headers: jsonHeaders() })
-          .then(function (r) { return r.json(); })
-          .then(function () {
-            // Deleting the agent whose page this is leaves a 404 behind on reload.
-            if (agent.key === currentAgentKey) { window.location.href = window.location.pathname; return; }
-            row.remove();
-            removeAgentMenuItem(agent.key);
-            if (!agentsList.children.length) agentsList.appendChild(emptyRow(ai18n.noAgents));
-          });
-      });
-      actions.appendChild(delBtn);
-    }
-
-    row.appendChild(body);
-    row.appendChild(actions);
-    return row;
   }
 
   function agentMenuList() {
@@ -687,16 +681,108 @@ document.addEventListener('DOMContentLoaded', function () {
     if (icon) li.appendChild(icon.cloneNode(true));
     li.appendChild(a);
     ul.appendChild(li);
+    decorateAgentMenuRows();
   }
 
-  function removeAgentMenuItem(key) {
+  // ── Per-agent actions on the left-nav rows ──
+  // The header's actions, reachable on any of your agents without opening it.
+  // The shared Chat agent is not one you manage, so its row gets none.
+  var ROW_ACTIONS = [
+    { action: 'edit',   title: ai18n.editAgent },
+    { action: 'run',    title: ai18n.runNow },
+    { action: 'clear',  title: ai18n.clearLog,    cls: 'danger' },
+    { action: 'delete', title: ai18n.deleteAgent, cls: 'danger' }
+  ];
+
+  function agentKeyFromHref(href) {
+    var match = /[?&]agent_key=([^&]+)/.exec(href || '');
+    return match ? decodeURIComponent(match[1]) : '';
+  }
+
+  function decorateAgentMenuRows() {
     var ul = agentMenuList();
     if (!ul) return;
-    var a = ul.querySelector('a[href*="agent_key=' + key + '"]');
-    if (a) {
-      var li = a.closest('li');
-      if (li) li.remove();
-    }
+    Array.prototype.forEach.call(ul.querySelectorAll('a[href*="agent_key="]'), function (link) {
+      var key = agentKeyFromHref(link.getAttribute('href'));
+      var li = link.closest('li');
+      if (!key || key === 'query' || !li || li.classList.contains('agent-row')) return;
+      li.classList.add('agent-row');
+
+      var box = document.createElement('span');
+      box.className = 'agent-row-actions';
+      box.setAttribute('data-agent-key', key);
+      ROW_ACTIONS.forEach(function (spec) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.title = spec.title || '';
+        // Icon comes from CSS: an svg here would make the theme's icon pass
+        // treat the row as already decorated and skip its own menu icon.
+        btn.className = 'act-' + spec.action + (spec.cls ? ' ' + spec.cls : '');
+        btn.setAttribute('data-agent-action', spec.action);
+        box.appendChild(btn);
+      });
+      li.appendChild(box);
+    });
+  }
+
+  // Delegated: rows come and go as agents are created and deleted.
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest && e.target.closest('.agent-row-actions button');
+    if (!btn) return;
+    e.preventDefault();
+    var box = btn.parentNode;
+    var key = box.getAttribute('data-agent-key');
+    var action = btn.getAttribute('data-agent-action');
+    if (action === 'edit') withAgent(key, openAgentForm);
+    else if (action === 'run') runAgentRow(btn, key);
+    else if (action === 'clear') clearAgentLog(key);
+    else if (action === 'delete') deleteAgentRow(box, key);
+  });
+
+  function runAgentRow(btn, key) {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.title = ai18n.running;
+    fetch(customAgentsUrl + '/' + key + '/run', { method: 'POST', headers: jsonHeaders() })
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        if (!data || !data.run_id) throw new Error('run not started');
+        pollRun(key, data.run_id, 0, function () {
+          // Only the open agent's page shows what the run wrote.
+          if (key === currentAgentKey) { window.location.reload(); return; }
+          btn.disabled = false;
+          btn.title = ai18n.runNow;
+        });
+      })
+      .catch(function () {
+        btn.disabled = false;
+        btn.title = ai18n.runNow;
+      });
+  }
+
+  function clearAgentLog(key) {
+    if (!window.confirm(i18n.clearConfirm)) return;
+    fetch(clearUrl.split('?')[0] + '?agent_key=' + encodeURIComponent(key),
+          { method: 'DELETE', headers: jsonHeaders(), body: JSON.stringify({ all: '1' }) })
+      .then(function (res) { return res.json(); })
+      .then(function () {
+        if (key !== currentAgentKey) return;
+        clearChat();
+        currentChatId = newChatId();
+        setHasMessages(false);
+      });
+  }
+
+  function deleteAgentRow(box, key) {
+    if (!window.confirm(ai18n.deleteAgentConfirm)) return;
+    fetch(customAgentsUrl + '/' + key, { method: 'DELETE', headers: jsonHeaders() })
+      .then(function (res) { return res.json(); })
+      .then(function () {
+        // This page goes with the agent; the bare URL is the Query Agent's.
+        if (key === currentAgentKey) { window.location.href = window.location.pathname; return; }
+        var li = box.parentNode;
+        if (li && li.parentNode) li.parentNode.removeChild(li);
+      });
   }
 
   // ── Create / edit form (modal) ──
@@ -715,15 +801,26 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   function parseCronForForm(cron) {
-    if (!cron) return { frequency: 'none', time: '09:00', weekday: '0', day: '1', timezone: defaultTimezone };
+    if (!cron) {
+      return { frequency: 'none', time: '09:00', weekday: '0', day: '1',
+               every: '4', minute: '0', timezone: defaultTimezone };
+    }
     var parts = cron.trim().split(/\s+/);
     var min = parts[0], hour = parts[1], dom = parts[2], dow = parts[4], tz = parts[5] || defaultTimezone;
     var time = (hour.length < 2 ? '0' + hour : hour) + ':' + (min.length < 2 ? '0' + min : min);
-    var frequency = 'daily', weekday = '0', day = '1';
-    if (dow === '1-5') { frequency = 'weekdays'; }
+    var frequency = 'daily', weekday = '0', day = '1', every = '4', minute = '0';
+    // An hour step ("*/4") or a bare "*" is an interval, not a time of day.
+    var step = /^\*\/(\d+)$/.exec(hour);
+    if (step || hour === '*') {
+      frequency = 'hourly';
+      every = step ? step[1] : '1';
+      minute = String(parseInt(min, 10) || 0);
+    }
+    else if (dow === '1-5') { frequency = 'weekdays'; }
     else if (dow !== '*') { frequency = 'weekly'; weekday = dow; }
     else if (dom !== '*') { frequency = 'monthly'; day = dom; }
-    return { frequency: frequency, time: time, weekday: weekday, day: day, timezone: tz };
+    return { frequency: frequency, time: time, weekday: weekday, day: day,
+             every: every, minute: minute, timezone: tz };
   }
 
   function ensureAgentModal() {
@@ -743,7 +840,13 @@ document.addEventListener('DOMContentLoaded', function () {
 
   function closeAgentForm() {
     var modal = document.getElementById('agent-form-modal');
-    if (modal) modal.hidden = true;
+    if (!modal) return;
+    modal.hidden = true;
+    // Core's warnLeavingUnsaved scans every textarea in the document and only
+    // clears the flag on a real form submit — this form saves over fetch, so a
+    // left-behind task field would warn on every later navigation. The form is
+    // rebuilt on each open anyway.
+    modal.innerHTML = '';
   }
 
   function openAgentForm(agent) {
@@ -778,6 +881,14 @@ document.addEventListener('DOMContentLoaded', function () {
     taskHint.textContent = ai18n.agentTaskHint;
     form.appendChild(taskHint);
 
+    // Blank unless MCP servers are configured — those are the notify channels.
+    if (ai18n.notifyChannels) {
+      var notifyHint = document.createElement('p');
+      notifyHint.className = 'agent-form-hint';
+      notifyHint.textContent = ai18n.notifyChannels;
+      form.appendChild(notifyHint);
+    }
+
     var schedLabel = document.createElement('div');
     schedLabel.className = 'agent-form-section-label';
     schedLabel.textContent = ai18n.agentSchedule;
@@ -789,7 +900,7 @@ document.addEventListener('DOMContentLoaded', function () {
     // 'none' replaces the old on/off checkbox — it is how an agent is left unscheduled.
     var freqSelect = document.createElement('select');
     freqSelect.className = 'multi-row';
-    [['none', ai18n.freqNone], ['daily', ai18n.freqDaily], ['weekdays', ai18n.freqWeekdays], ['weekly', ai18n.freqWeekly], ['monthly', ai18n.freqMonthly]]
+    [['none', ai18n.freqNone], ['hourly', ai18n.freqHourly], ['daily', ai18n.freqDaily], ['weekdays', ai18n.freqWeekdays], ['weekly', ai18n.freqWeekly], ['monthly', ai18n.freqMonthly]]
       .forEach(function (pair) {
         var opt = document.createElement('option');
         opt.value = pair[0];
@@ -798,6 +909,38 @@ document.addEventListener('DOMContentLoaded', function () {
         freqSelect.appendChild(opt);
       });
     schedFields.appendChild(labeled(textLabel(ai18n.freqLabel), freqSelect));
+
+    // "Every N hours at minute M". Only 24's divisors are offered: a step like
+    // */5 would leave a short gap at midnight instead of an even interval.
+    var everySelect = document.createElement('select');
+    everySelect.className = 'multi-row';
+    [1, 2, 3, 4, 6, 8, 12].forEach(function (n) {
+      var opt = document.createElement('option');
+      opt.value = String(n);
+      opt.textContent = String(n);
+      if (String(sched.every) === String(n)) opt.selected = true;
+      everySelect.appendChild(opt);
+    });
+
+    var minuteSelect = document.createElement('select');
+    minuteSelect.className = 'multi-row';
+    for (var m = 0; m < 60; m += 5) {
+      var mOpt = document.createElement('option');
+      mOpt.value = String(m);
+      mOpt.textContent = (m < 10 ? '0' : '') + m;
+      if (String(sched.minute) === String(m)) mOpt.selected = true;
+      minuteSelect.appendChild(mOpt);
+    }
+
+    var intervalFields = document.createElement('div');
+    intervalFields.className = 'agent-interval-fields';
+    var hoursText = document.createElement('span');
+    hoursText.textContent = ai18n.hoursLabel;
+    intervalFields.appendChild(everySelect);
+    intervalFields.appendChild(hoursText);
+    intervalFields.appendChild(minuteSelect);
+    var intervalRow = labeled(textLabel(ai18n.everyLabel), intervalFields);
+    schedFields.appendChild(intervalRow);
 
     var timeInput = document.createElement('input');
     timeInput.type = 'time';
@@ -861,7 +1004,9 @@ document.addEventListener('DOMContentLoaded', function () {
     form.appendChild(schedFields);
 
     function syncSchedVisibility() {
-      timeRow.hidden = freqSelect.value === 'none';
+      // Hourly sets its own minute, and its hour is the interval — no time of day.
+      intervalRow.hidden = freqSelect.value !== 'hourly';
+      timeRow.hidden = freqSelect.value === 'none' || freqSelect.value === 'hourly';
       weekdayRow.hidden = freqSelect.value !== 'weekly';
       dayRow.hidden = freqSelect.value !== 'monthly';
     }
@@ -894,14 +1039,18 @@ document.addEventListener('DOMContentLoaded', function () {
       errorMsg.textContent = '';
       if (!name) { errorMsg.textContent = ai18n.errNameBlank; return; }
       if (!task) { errorMsg.textContent = ai18n.errTaskBlank; return; }
-      if (freqSelect.value !== 'none' && !timeInput.value) { errorMsg.textContent = ai18n.errSchedule; return; }
+      var needsTime = freqSelect.value !== 'none' && freqSelect.value !== 'hourly';
+      if (needsTime && !timeInput.value) { errorMsg.textContent = ai18n.errSchedule; return; }
 
       var payload = {
         name: name,
         task: task
       };
       payload.frequency = freqSelect.value;
-      if (freqSelect.value !== 'none') {
+      if (freqSelect.value === 'hourly') {
+        payload.every = everySelect.value;
+        payload.minute = minuteSelect.value;
+      } else if (freqSelect.value !== 'none') {
         payload.time = timeInput.value;
         payload.weekday = weekdaySelect.value;
         payload.day = daySelect.value;
@@ -922,7 +1071,11 @@ document.addEventListener('DOMContentLoaded', function () {
           errorMsg.textContent = '';
           closeAgentForm();
           applyAgentMenuEntry(res.data.menu);
-          if (agentsPanel && !agentsPanel.hidden) loadAgentsList();
+          // The header carries the agent's name on its own page.
+          var heading = document.querySelector('#agent-chat-header h2');
+          if (heading && res.data.agent && res.data.agent.key === currentAgentKey) {
+            heading.textContent = res.data.agent.name;
+          }
         })
         .catch(function () {
           saveBtn.disabled = false;
@@ -939,4 +1092,6 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   if (addAgentBtn) addAgentBtn.addEventListener('click', function () { openAgentForm(null); });
+
+  decorateAgentMenuRows();
 });

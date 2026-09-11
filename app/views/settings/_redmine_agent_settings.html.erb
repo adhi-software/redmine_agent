@@ -87,20 +87,6 @@
 </p>
 
 <p>
-  <label for="settings_run_as_login"><strong><%= l(:label_agent_run_as_login) %></strong></label>
-  <%= text_field_tag 'settings[run_as_login]', settings['run_as_login'],
-        id: 'settings_run_as_login', style: 'width:200px; max-width:100%; box-sizing:border-box;' %></br>
-  <%= l(:label_agent_run_as_login_hint) %>
-</p>
-
-<p>
-  <label for="settings_base_url"><strong><%= l(:label_agent_base_url) %></strong></label>
-  <%= text_field_tag 'settings[base_url]', settings['base_url'],
-        id: 'settings_base_url', style: 'width:320px; max-width:100%; box-sizing:border-box;' %></br>
-  <%= l(:label_agent_base_url_hint) %>
-</p>
-
-<p>
   <label><strong><%= l(:label_redmine_agent_mcp_status) %></strong></label>
   <% if is_mcp_install %>
     <span class="mcp-status-ok"><%= sprite_icon('checked') %></span>
@@ -389,6 +375,11 @@ function setConnStatus(elId, connected) {
   el.appendChild(document.createTextNode(connected ? LBL_AGENT_CONNECTED : LBL_AGENT_NOT_CONNECTED));
 }
 
+// Disable the dialog's own buttons while an Ok-triggered test is in flight.
+function setDialogBusy($dlg, busy) {
+  $dlg.dialog("widget").find(".ui-dialog-buttonpane button").prop("disabled", !!busy);
+}
+
 function resetAgentTestStatus() { resetTestStatus("agent-test-status"); }
 
 function setAgentConnected(connected) {
@@ -415,6 +406,7 @@ function testAgentModel() {
   st.textContent = LBL_AGENT_TESTING;
   st.className = "agent-test-status testing";
 
+  var verdict = jQuery.Deferred();
   jQuery.ajax({
     url: AGENT_TEST_URL,
     method: "POST",
@@ -441,7 +433,10 @@ function testAgentModel() {
     st.textContent = msg;
     st.className = "agent-test-status fail";
     setAgentConnected(false);
-  });
+  }).always(function () { verdict.resolve(agentConnected); });
+
+  // The verdict lets the dialog's Ok wait on the same request this link makes.
+  return verdict.promise();
 }
 
 function agentMaskedLabel(n, m, s, k) {
@@ -479,6 +474,7 @@ function testMcpServer() {
   st.textContent = LBL_MCP_TESTING;
   st.className = "agent-test-status testing";
 
+  var verdict = jQuery.Deferred();
   jQuery.ajax({
     url: MCP_TEST_URL,
     method: "POST",
@@ -486,7 +482,7 @@ function testMcpServer() {
     data: {
       name: name,
       url: url,
-      token: token,
+      mcp_token: token,
       authenticity_token: AGENT_CSRF_TOKEN
     }
   }).done(function (resp) {
@@ -506,7 +502,10 @@ function testMcpServer() {
     st.textContent = msg;
     st.className = "agent-test-status fail";
     setMcpConnected(false);
-  });
+  }).always(function () { verdict.resolve(mcpConnected); });
+
+  // The verdict lets the dialog's Ok wait on the same request this link makes.
+  return verdict.promise();
 }
 
 function ensureMcpDialog() {
@@ -530,18 +529,30 @@ function ensureMcpDialog() {
         if (url === "") { alert(LBL_MCP_URL_FIELD + " " + LBL_AGENT_INVALID); return; }
         if (agentNameExists(box, name, editIndex)) { alert(LBL_AGENT_DUPLICATE); return; }
 
-        var opt;
-        if ("Add" === mcpAction) {
-          opt = document.createElement("option");
-          box.options.add(opt);
-        } else {
-          opt = box.options[box.selectedIndex];
+        function save() {
+          var opt;
+          if ("Add" === mcpAction) {
+            opt = document.createElement("option");
+            box.options.add(opt);
+          } else {
+            opt = box.options[box.selectedIndex];
+          }
+          opt.value = [name, url, token, mcpConnected ? "1" : "0"].join("|");
+          opt.text  = mcpMaskedLabel(name, url, token);
+          if ("Add" === mcpAction) { box.selectedIndex = box.options.length - 1; }
+          renderMcpList();
+          $dlg.dialog("close");
         }
-        opt.value = [name, url, token, mcpConnected ? "1" : "0"].join("|");
-        opt.text  = mcpMaskedLabel(name, url, token);
-        if ("Add" === mcpAction) { box.selectedIndex = box.options.length - 1; }
-        renderMcpList();
-        jQuery(this).dialog("close");
+
+        // Only a verified row goes into the list. A green tick already covers
+        // these exact values - editing any of them clears it.
+        if (mcpConnected) { save(); return; }
+        setDialogBusy($dlg, true);
+        testMcpServer().done(function (ok) {
+          setDialogBusy($dlg, false);
+          // Esc can close the dialog mid-test; on failure the message is already shown.
+          if (ok && $dlg.dialog("isOpen")) { save(); }
+        });
       },
       "Cancel": function () { jQuery(this).dialog("close"); }
     }
@@ -602,18 +613,30 @@ function ensureAgentDialog() {
         if (model === "") { alert(LBL_AGENT_MODEL + " " + LBL_AGENT_INVALID); return; }
         if (agentNameExists(box, name, editIndex)) { alert(LBL_AGENT_DUPLICATE); return; }
 
-        var opt;
-        if ("Add" === agentAction) {
-          opt = document.createElement("option");
-          box.options.add(opt);
-        } else {
-          opt = box.options[box.selectedIndex];
+        function save() {
+          var opt;
+          if ("Add" === agentAction) {
+            opt = document.createElement("option");
+            box.options.add(opt);
+          } else {
+            opt = box.options[box.selectedIndex];
+          }
+          opt.value = [name, model, server, key, agentConnected ? "1" : "0"].join("|");
+          opt.text  = agentMaskedLabel(name, model, server, key);
+          if ("Add" === agentAction) { box.selectedIndex = box.options.length - 1; }
+          renderAgentList();
+          $dlg.dialog("close");
         }
-        opt.value = [name, model, server, key, agentConnected ? "1" : "0"].join("|");
-        opt.text  = agentMaskedLabel(name, model, server, key);
-        if ("Add" === agentAction) { box.selectedIndex = box.options.length - 1; }
-        renderAgentList();
-        jQuery(this).dialog("close");
+
+        // Only a verified row goes into the list. A green tick already covers
+        // these exact values - editing any of them clears it.
+        if (agentConnected) { save(); return; }
+        setDialogBusy($dlg, true);
+        testAgentModel().done(function (ok) {
+          setDialogBusy($dlg, false);
+          // Esc can close the dialog mid-test; on failure the message is already shown.
+          if (ok && $dlg.dialog("isOpen")) { save(); }
+        });
       },
       "Cancel": function () { jQuery(this).dialog("close"); }
     }
@@ -653,7 +676,7 @@ function removeSelectedAgent() { if (agentList) { agentList.remove(); } }
 (function () {
   // Editing a connection field invalidates an earlier test, so neither the
   // message nor the indicator refers to settings it wasn't run against.
-  ["agent_model", "agent_server_url", "agent_api_key"].forEach(function (id) {
+  ["agent_name", "agent_model", "agent_server_url", "agent_api_key"].forEach(function (id) {
     var field = document.getElementById(id);
     if (field) {
       field.addEventListener("input", function () {

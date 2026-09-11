@@ -15,17 +15,27 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
-# Represents a configured AI agent (an entry in the agent list).
+# Represents a configured AI agent (an entry in the agent list): its name,
+# task and schedule.
 class AiAgent < ActiveRecord::Base
   has_many :ai_agent_chats, dependent: :destroy
-  has_many :ai_chat_messages, through: :ai_agent_chats
 
   # case_sensitive: false compares with LOWER() on every adapter, so the name is
   # unique the same way on MySQL (case-insensitive collation) and on
   # PostgreSQL / SQLite / SQL Server (case-sensitive by default).
   validates :name, presence: true, uniqueness: { case_sensitive: false }
+  validates :agent_key, uniqueness: true, allow_nil: true
 
   scope :active, -> { where(active: true) }
   # Match a name regardless of case on any database.
   scope :named, ->(name) { where('LOWER(name) = ?', name.to_s.downcase) }
+  # Every agent is created with a key; this keeps a row that somehow lost one
+  # from surfacing as an agent with a broken menu entry.
+  scope :agents, -> { where.not(agent_key: nil) }
+  # An agent belongs to whoever created it; only the seeded default agent,
+  # which has no creator, is shared with everyone.
+  scope :visible, ->(user) {
+    agents.where(created_by_id: user.id)
+          .or(agents.where(agent_key: RedmineAgent::CustomAgents::QUERY_AGENT_KEY))
+  }
 end

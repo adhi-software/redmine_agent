@@ -27,11 +27,9 @@ class RedmineAgentController < ApplicationController
   include RedmineAgentHelper
 
   before_action :require_login
-  before_action :require_admin, only: [
-    :test_model, :test_mcp_server, :custom_agents, :create_agent, :update_agent,
-    :destroy_agent, :run_agent
-  ]
+  before_action :require_admin, only: [:test_model, :test_mcp_server]
   before_action :set_agent, only: [:index, :chat_request, :history, :clear]
+  before_action :set_managed_agent, only: [:update_agent, :destroy_agent, :run_agent, :agent_runs]
   before_action :sync_agent_menu
 
   accept_api_auth :index, :agents, :chat_request, :history, :clear
@@ -54,14 +52,19 @@ class RedmineAgentController < ApplicationController
     @history_url = url_for(controller: '/redmine_agent', action: 'history', agent_key: agent_key_param)
     @clear_url   = url_for(controller: '/redmine_agent', action: 'clear', agent_key: agent_key_param)
 
-    @greeting     = l(:label_redmine_agent_greeting, default: 'Hi! How can I help you today?')
     @agent_title  = @agent['name'].presence || l(:label_redmine_agent)
-    # nil on the Query Agent page — there the icon still lists every agent.
+    # Set on a scheduled agent's page, blank on the Query Agent's.
     @current_agent_key = agent_key_param
     # The zone new schedules are saved in — shown next to the time field.
     @agent_timezone = default_agent_timezone
 
-    @initial_chat = user_chats(User.current, ai_agent_record).first
+    # A scheduled agent's page is its run log, capped like the log itself; the
+    # Query Agent keeps one chat. Rendering more than that is wasted markdown.
+    limit = agent_key_param ? RedmineAgent::CustomAgents::MAX_RUNS_PER_AGENT : 1
+    chats = user_chats(User.current, ai_agent_record, limit: limit)
+    @initial_chats = agent_key_param ? chats.reverse : chats
+    # A failed run never produced a chat, so it would be invisible otherwise.
+    @failed_runs = agent_key_param ? failed_runs(@agent['key']) : []
   end
 
   def chat_request
@@ -104,8 +107,12 @@ class RedmineAgentController < ApplicationController
       render json: result.merge(id: chat_message&.id, chat_id: chat.id)
     rescue => e
       Rails.logger.error "AI chat request failed (#{provider}): #{e.message}\n#{e.backtrace.first(5).join("\n")}"
+      # Nothing was saved, so a chat opened for this request is an empty row.
+      chat.destroy if chat && chat.ai_chat_messages.empty?
       error_message = e.message.to_s[/:message\s*=>\s*"([^"]+)"/, 1] || e.message
-      render json: { error: error_message }, status: :bad_gateway
+      # A retry would repeat whatever already ran, so the Runner is told.
+      render json: { error: error_message, executed: !!@write_executed },
+             status: :bad_gateway
     end
   end
 
@@ -180,7 +187,7 @@ class RedmineAgentController < ApplicationController
   # still useless to the model.
   def test_mcp_server
     server = { name: params[:name].to_s.strip.presence || 'mcp', builtin: false,
-               url: params[:url].to_s.strip, token: params[:token].to_s.strip }
+               url: params[:url].to_s.strip, token: params[:mcp_token].to_s.strip }
     raise l(:label_agent_mcp_test_fail) if server[:url].blank?
 
     session_id, _instructions, version = mcp_handshake(server)
@@ -194,7 +201,7 @@ class RedmineAgentController < ApplicationController
 
   # List the configured AiAgent rows (from the DB) for the mobile sidebar.
   def agents
-    agents = AiAgent.active.order(:name).map do |a|
+    agents = AiAgent.visible(User.current).active.order(:name).map do |a|
       { id: a.id, name: a.name, description: a.description }
     end
     render json: { agents: agents }
@@ -206,23 +213,26 @@ class RedmineAgentController < ApplicationController
     render json: { chats: user_chats(User.current, ai_agent_record), errors: show_agent_menu? }
   end
 
-  # Permanently delete a whole chat, scoped to the current user and agent.
+  # Permanently delete one chat, or the agent's whole history, scoped to the
+  # current user and agent.
   def clear
+    scope   = AiAgentChat.for_user(User.current).for_agent(ai_agent_record)
     chat_id = params[:chat_id].to_s
-    if chat_id.present? && chat_id.match?(/\A\d+\z/)
-      AiAgentChat.for_user(User.current)
-                 .for_agent(ai_agent_record)
-                 .where(id: chat_id)
-                 .destroy_all
+    if params[:all].to_s == '1'
+      scope.destroy_all
+      # Failed runs are entries of their own on the page, so a clear takes them too.
+      RedmineAgent::CustomAgents.clear_runs(@agent['key']) if agent_key_param
+    elsif chat_id.match?(/\A\d+\z/)
+      scope.where(id: chat_id).destroy_all
     end
     render json: { success: true }
   end
 
-  # List the manageable agents for the admin-only Agents panel. The default
-  # Query Agent is left out — it has no task or schedule and can't be deleted,
+  # List the agents this user may manage — the ones they created. The default
+  # Query Agent is left out: it has no task or schedule and can't be deleted,
   # so there is nothing to manage. It still appears in the sidebar.
   def custom_agents
-    list = RedmineAgent::CustomAgents.all
+    list = RedmineAgent::CustomAgents.visible_to(User.current)
                                      .reject { |a| a['key'] == RedmineAgent::CustomAgents::QUERY_AGENT_KEY }
                                      .map { |a| present_agent(a) }
     render json: { agents: list }
@@ -250,15 +260,13 @@ class RedmineAgentController < ApplicationController
       'cron'          => cron,
       'created_by'    => User.current.id
     )
-    RedmineAgent::CustomAgents.ai_agent_record(agent)
     RedmineAgent::CustomAgents.sync_menu!
 
     render json: { agent: present_agent(agent), menu: menu_entry(agent) }
   end
 
   def update_agent
-    agent = RedmineAgent::CustomAgents.find(params[:key].to_s)
-    return render json: { error: l(:error_agent_unknown) }, status: :unprocessable_entity unless agent
+    agent = @managed_agent
 
     attrs = {}
     if params[:name].present?
@@ -277,38 +285,57 @@ class RedmineAgentController < ApplicationController
     end
 
     updated = RedmineAgent::CustomAgents.update(agent['key'], attrs)
-    RedmineAgent::CustomAgents.sync_ai_agent!(updated)
     RedmineAgent::CustomAgents.sync_menu!
     render json: { agent: present_agent(updated), menu: menu_entry(updated) }
   end
 
+  # The default agent has no creator, so set_managed_agent already refused it.
   def destroy_agent
-    key = params[:key].to_s
-    return render json: { error: l(:error_agent_cannot_delete_default) }, status: :unprocessable_entity if key == RedmineAgent::CustomAgents::QUERY_AGENT_KEY
-
-    agent = RedmineAgent::CustomAgents.find(key)
-    return render json: { error: l(:error_agent_unknown) }, status: :unprocessable_entity unless agent
-
-    RedmineAgent::CustomAgents.delete(key)
+    RedmineAgent::CustomAgents.delete(@managed_agent['key'])
     RedmineAgent::CustomAgents.sync_menu!
     render json: { success: true }
   end
 
-  def run_agent
-    agent = RedmineAgent::CustomAgents.find(params[:key].to_s)
-    return render json: { error: l(:error_agent_unknown) }, status: :unprocessable_entity unless agent
-    # Would post an empty message and still log an 'ok' run.
-    return render json: { error: l(:error_agent_task_blank) }, status: :unprocessable_entity if agent['task'].blank?
+  # The agent's run log — the panel row shows only the last one.
+  def agent_runs
+    runs = RedmineAgent::CustomAgents.runs(@managed_agent['key']).map do |run|
+      { id: run.id, started_at: run.started_at&.iso8601, status: run.status,
+        error: run.error, reply_excerpt: run.reply_excerpt }
+    end
+    render json: { runs: runs }
+  end
 
-    render json: { run: RedmineAgent::Runner.run(agent) }
+  # Runs in the background: the run posts back into this app, so waiting for it
+  # here would hold one request thread hostage to another.
+  def run_agent
+    # Would post an empty message and still log an 'ok' run.
+    return render json: { error: l(:error_agent_task_blank) }, status: :unprocessable_entity if @managed_agent['task'].blank?
+
+    # A stamp of its own, so the row is claimed before the browser polls for it.
+    stamp = "#{@managed_agent['key']}@manual #{SecureRandom.hex(4)}"
+    run   = RedmineAgent::CustomAgents.claim_run(@managed_agent['key'], stamp)
+    RedmineAgent::Runner.run_async(@managed_agent, stamp)
+    render json: { run_id: run&.id }
   end
 
   private
 
+  # An agent nobody may see is indistinguishable from one that doesn't exist,
+  # so a foreign agent_key 404s rather than opening its chat.
   def set_agent
     key = params[:agent_key].to_s.presence || RedmineAgent::CustomAgents::QUERY_AGENT_KEY
     @agent = RedmineAgent::CustomAgents.find(key)
-    render_404 unless @agent
+    render_404 unless @agent && RedmineAgent::CustomAgents.visible?(@agent['key'], @agent['created_by'])
+  end
+
+  # The agent a management action targets. Managing one is the creator's alone
+  # — the default agent, which has no creator, is nobody's to manage.
+  def set_managed_agent
+    @managed_agent = RedmineAgent::CustomAgents.find(params[:key].to_s)
+    return render json: { error: l(:error_agent_unknown) }, status: :unprocessable_entity unless @managed_agent
+    return if @managed_agent['created_by'] == User.current.id
+
+    render json: { error: l(:error_agent_not_allowed) }, status: :forbidden
   end
 
   def sync_agent_menu
@@ -322,16 +349,21 @@ class RedmineAgentController < ApplicationController
   # The AiAgent DB row this request's agent chat history is scoped to,
   # memoized so a single request never looks it up twice.
   def ai_agent_record
-    @ai_agent_record ||= RedmineAgent::CustomAgents.ai_agent_record(@agent)
+    @ai_agent_record ||= RedmineAgent::CustomAgents.record_for(@agent['key'])
   end
 
+  # Runs that ended in an error, oldest first. They never reached the chat, so
+  # the page has nothing else to show for them.
+  def failed_runs(agent_key)
+    RedmineAgent::CustomAgents.runs(agent_key)
+                              .select { |run| run.status.to_s.start_with?('error') }
+                              .reverse
+                              .map { |run| { at: run.started_at&.iso8601, error: run.error } }
+  end
+
+  # What the edit form reads back; nothing else is rendered from this.
   def present_agent(agent)
-    {
-      key: agent['key'], name: agent['name'], task: agent['task'], cron: agent['cron'],
-      deletable: agent['key'] != RedmineAgent::CustomAgents::QUERY_AGENT_KEY,
-      next_run: (agent['cron'].present? && (c = Fugit::Cron.parse(agent['cron'])) && c.next_time&.to_t&.iso8601),
-      last_run: RedmineAgent::CustomAgents.last_run(agent['key'])
-    }
+    { key: agent['key'], name: agent['name'], task: agent['task'], cron: agent['cron'] }
   end
 
   # only_path: in a controller url_for is absolute, but the JS matches this
@@ -356,9 +388,24 @@ class RedmineAgentController < ApplicationController
   # frequency/time/weekday/day fields. The zone is not asked for — it comes
   # from the instance setting, or stays whatever the agent already had, so
   # editing an agent never silently shifts its schedule.
+  # Only 24's divisors: any other step leaves a short gap at midnight rather
+  # than an even interval.
+  HOUR_INTERVALS = [1, 2, 3, 4, 6, 8, 12].freeze
+
   def build_agent_cron(params, current_cron = nil)
     parts = current_cron.to_s.split
     tz = (parts.size >= 6 ? parts[5] : nil) || default_agent_timezone
+
+    # Hourly carries an interval and a minute instead of a time of day.
+    if params[:frequency].to_s == 'hourly'
+      every = params[:every].to_i
+      at    = params[:minute].to_i
+      return nil unless HOUR_INTERVALS.include?(every) && (0..59).cover?(at)
+
+      cron = "#{at} #{every == 1 ? '*' : "*/#{every}"} * * * #{tz}"
+      return Fugit::Cron.parse(cron) ? cron : nil
+    end
+
     hour, minute = params[:time].to_s.split(':').map { |n| n.to_i }
     return nil unless (0..23).cover?(hour) && (0..59).cover?(minute)
 
@@ -617,6 +664,12 @@ class RedmineAgentController < ApplicationController
     WRITE_TOOL_PREFIXES.any? { |p| name.to_s.start_with?(p) }
   end
 
+  # Remembers that a data-changing tool was reached, so a failure later in the
+  # turn is not retried as if nothing had happened.
+  def note_write_tool(name, routes)
+    @write_executed = true if write_tool?(name, routes)
+  end
+
   # Write tools from the live MCP list; nothing outside this set is approvable.
   def available_write_tools(mcp_tools, routes = nil)
     Array(mcp_tools).map { |t| t['name'].to_s }
@@ -624,11 +677,27 @@ class RedmineAgentController < ApplicationController
                     .map(&:downcase)
   end
 
-  # Scheduled runs have nobody to approve, so the Runner's own loopback call
-  # skips the gate. Only the configured run-as user may set it.
+  # A run has nobody to approve, so the Runner's own loopback call skips the
+  # gate. Its signed header is what proves that: a browser cannot mint one,
+  # and the creator check stays because the Runner authenticates as them.
+  # Decided once per request: the token expires before a long run does, and the
+  # answer must not flip half way through the tool loop.
   def runner_request?
-    params[:runner].to_s == '1' &&
-      User.current.login == (Setting.plugin_redmine_agent['run_as_login'].to_s.presence || 'admin')
+    return @runner_request if defined?(@runner_request)
+
+    @runner_request =
+      RedmineAgent::Runner.valid_token?(
+        request.headers[RedmineAgent::Runner::RUN_TOKEN_HEADER], @agent['key']
+      ) &&
+      @agent['created_by'].present? &&
+      User.current.id == @agent['created_by']
+  end
+
+  # Whether this request is gated at all. The prompt, the tool loop and the
+  # reply all have to agree: a prompt that says "preview and wait" is what
+  # stops a run from ever calling the tool the loop would have let through.
+  def approval_gate?
+    hitl_enabled? && !runner_request?
   end
 
   def decision(message)
@@ -777,7 +846,7 @@ class RedmineAgentController < ApplicationController
 
         # HITL: pause write tools until the user approves (reads still run).
         # Only "Approve" runs the action; "Reject" cancels without re-previewing.
-        if hitl_enabled? && !runner_request? && !approved?(message) &&
+        if approval_gate? && !approved?(message) &&
            tool_calls.any? { |tc| write_tool?(tc[:name], routes) }
           awaiting_approval = !rejected?(message)
           note = awaiting_approval ? HITL_NOTE : HITL_CANCEL_NOTE
@@ -794,13 +863,14 @@ class RedmineAgentController < ApplicationController
 
         if claude?(provider)
           tool_results = tool_calls.map do |tc|
-            safe_args, err = validate_tool_call(tc[:name], tc[:args])
+            safe_args, err = validate_tool_call(tc[:name], tc[:args], routes)
             if err
               logger.warn("Blocked bad Claude tool call #{tc[:name]}: #{err}")
               had_error = true
               next { type: 'tool_result', tool_use_id: tc[:id], content: { error: err }.to_json, is_error: true }
             end
 
+            note_write_tool(tc[:name], routes)
             result = call_mcp_tool(routes, tc[:name], safe_args)
             logger.info("Claude tool result (#{tc[:name]}): #{result.inspect.truncate(400)}")
             is_err = tool_result_error?(result)
@@ -815,7 +885,7 @@ class RedmineAgentController < ApplicationController
           messages << { role: 'user', content: tool_results }
         else
           tool_calls.each do |tc|
-            safe_args, err = validate_tool_call(tc[:name], tc[:args])
+            safe_args, err = validate_tool_call(tc[:name], tc[:args], routes)
             if err
               messages << tool_result_message(provider, tc, { error: err }.to_json)
               had_error = true
@@ -827,6 +897,7 @@ class RedmineAgentController < ApplicationController
               tool_result = executed_tools[signature]
               logger.info("Reusing cached tool result for #{signature}")
             else
+              note_write_tool(tc[:name], routes)
               tool_result = executed_tools[signature] = call_mcp_tool(routes, tc[:name], safe_args)
               ran_new_tool = true
               logger.info("Tool result (#{tc[:name]}): #{tool_result.inspect.truncate(400)}")
@@ -1394,7 +1465,7 @@ class RedmineAgentController < ApplicationController
     prefix = mcp_instructions.present? ? "#{mcp_instructions}\n\n" : ''
 
     hitl_block =
-      if hitl_enabled?
+      if approval_gate?
         <<~HITL
 
           HUMAN-IN-THE-LOOP APPROVAL (ENABLED)
@@ -1499,7 +1570,7 @@ class RedmineAgentController < ApplicationController
   # tool we don't have could only ever produce an empty reply.
   def finalize_reply(reply, awaiting_approval, write_tools)
     text    = reply[:reply].to_s
-    pending = hitl_enabled? &&
+    pending = approval_gate? &&
               (awaiting_approval || pending_write_tool(text, write_tools).present?)
 
     text = text.gsub(APPROVAL_MARKER_RE, '').strip
@@ -1646,8 +1717,18 @@ class RedmineAgentController < ApplicationController
     cleaned
   end
 
+  # Both guards below describe Redmine's own API, so they apply to the built-in
+  # server only — another MCP server validates its own arguments, and a Slack
+  # message is free text that would trip both. Unknown route: treat as Redmine.
+  def redmine_tool?(tool_name, routes)
+    route = routes.is_a?(Hash) ? routes[tool_name.to_s] : nil
+    route.nil? || !!route[:builtin]
+  end
+
   # Validate and clean arguments before sending to MCP.
-  def validate_tool_call(tool_name, arguments)
+  def validate_tool_call(tool_name, arguments, routes = nil)
+    return [arguments, nil] unless redmine_tool?(tool_name, routes)
+
     if sql_injected?(arguments)
       logger.warn("Blocked SQL in tool call #{tool_name}: #{arguments.inspect}")
       return [nil, "Invalid parameters for #{tool_name} — do not pass SQL. Use plain string values only."]

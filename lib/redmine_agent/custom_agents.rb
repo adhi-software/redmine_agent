@@ -1,18 +1,17 @@
 require 'securerandom'
 
 module RedmineAgent
-  # Agent store, backed by Setting.plugin_redmine_agent ('custom_agents').
-  # Run history is separate — see the agent_runs table / AgentRun, which is
-  # written on every run. Every write here goes through #mutate: a
-  # process-level Mutex plus a
-  # Setting.check_cache re-read inside the lock, so two threads (an admin
-  # request and the scheduler tick) never clobber each other's write.
+  # Agent store, backed by the ai_agents table — one row per agent, identified
+  # by its agent_key. Run history is separate: see the ai_agent_runs table /
+  # AiAgentRun, which is written on every run.
+  #
+  # Callers work with plain hashes ('key', 'name', 'task', 'cron', ...); the
+  # column mapping lives here.
   #
   # A schedule is just an optional property of an agent (a 'cron' string) —
-  # there is no separate schedule store. "Query Agent" is a seeded agent like
-  # any other (key 'query_agent', no task, no cron).
+  # there is no separate schedule store. "Chat" is the default agent
+  # (key 'query', no task, no cron); it is seeded by the migration.
   module CustomAgents
-    MUTEX = Mutex.new
     SYNC_MUTEX = Mutex.new
 
     # ":ai_agent_#{key}" must equal the menu item name already class-level
@@ -22,101 +21,105 @@ module RedmineAgent
     # Runs kept per agent.
     MAX_RUNS_PER_AGENT = 50
 
-    # To have a reminder delivered, add a line to the agent's task naming the
-    # Slack channel id, e.g. "Then send that reminder to C01234567 with
-    # slack_send_message." Nothing is sent unless the task asks for it.
-    CLOCK_IN_PROMPT = <<~PROMPT.freeze
-      Find the active employees who have not clocked in today.
+    # A claim the user cleared: kept so the occurrence is not re-run, shown
+    # nowhere, never retried (the Scheduler only retries 'error').
+    CLEARED_STATUS = 'cleared'.freeze
 
-      Use the attendance and employee tools to work out who is absent. Then reply
-      with one short summary line followed by the absent employees, one per line,
-      as "name (login)". Name only people the tools actually returned.
-
-      End with a short, polite reminder to clock in for today.
-    PROMPT
-
-    TIMESHEET_PROMPT = <<~PROMPT.freeze
-      Find the active users who have not submitted this week's timesheet.
-
-      1. Call list_users with status=1 and limit=100, paging with offset until you have
-         every active user. Keep each user's id, login and mail.
-      2. Call list_timesheets once with user_id set to those ids joined by commas,
-         period_type=1 and period=current_week. Do not pass a status filter. It answers
-         one row per user for the current week whose status is Empty, New, Rejected,
-         Submitted or Approved.
-      3. Anyone whose status is Empty, New or Rejected has not submitted.
-
-      Then reply with one short summary line followed by those people, one per line,
-      as "name (login)". Name only people the tools actually returned.
-
-      End with a short, polite reminder to submit this week's timesheet before the
-      week closes.
-    PROMPT
-
-    # Seeded once on first use.
-    BUILT_INS = [
-      { 'key' => QUERY_AGENT_KEY, 'name' => 'Query Agent', 'task' => '', 'cron' => nil },
-      { 'key' => 'clock_in_reminder', 'name' => 'Clock-in reminder', 'task' => CLOCK_IN_PROMPT,
-        'cron' => '0 10 * * 1-5 Asia/Kolkata' },
-      { 'key' => 'timesheet_submit_reminder', 'name' => 'Timesheet submit reminder', 'task' => TIMESHEET_PROMPT,
-        'cron' => '0 18 * * 5 Asia/Kolkata' }
-    ].freeze
+    # A failure we cannot prove left nothing behind: shown like any other
+    # error, but never retried — the work may already have happened.
+    PARTIAL_ERROR_STATUS = 'error_partial'.freeze
 
     class << self
+      # Every agent, whoever owns it — the scheduler runs them all.
+      # What the scheduler ticks over: an inactive agent is switched off.
       def all
-        seed!
-        Array(Setting.plugin_redmine_agent['custom_agents']).map { |a| normalize(a) }
+        AiAgent.agents.active.order(:id).map { |record| to_hash(record) }
+      end
+
+      # The agents this user may see: their own, plus the shared default agent.
+      def visible_to(user)
+        AiAgent.visible(user).order(:id).map { |record| to_hash(record) }
+      end
+
+      # Takes the two columns rather than an agent hash: the menu's condition
+      # runs on every request, from a signature that holds just these.
+      def visible?(key, created_by, user = User.current)
+        return false unless user.logged?
+
+        key.to_s == QUERY_AGENT_KEY || (created_by.present? && created_by == user.id)
       end
 
       def find(key)
-        all.find { |a| a['key'] == key.to_s }
+        record = record_for(key)
+        record && to_hash(record)
       end
 
+      # The AiAgent row an agent's chat history is scoped to.
+      def ai_agent_record(agent)
+        record_for(agent.is_a?(Hash) ? agent['key'] : agent)
+      end
+
+      def record_for(key)
+        k = key.to_s
+        k.present? ? AiAgent.find_by(agent_key: k) : nil
+      end
+
+      # Mirrors the unique name column: excluded by id, so the check does not
+      # depend on how the database compares a NULL agent_key.
       def name_taken?(name, except_key: nil)
-        n = name.to_s.strip.downcase
-        all.any? { |a| a['key'] != except_key.to_s && a['name'].to_s.strip.downcase == n }
+        scope = AiAgent.named(name)
+        current = except_key.present? ? record_for(except_key) : nil
+        scope = scope.where.not(id: current.id) if current
+        scope.exists?
       end
 
       def create(attrs)
-        agent = nil
-        mutate do |list|
-          key = loop do
-            k = "ag_#{SecureRandom.hex(4)}"
-            break k unless list.any? { |a| a['key'] == k }
-          end
-          agent = normalize(attrs).merge(
-            'key'        => key,
-            'enabled'    => true,
-            'created_at' => Time.now.utc.iso8601
-          )
-          list << agent
+        attrs = attrs.transform_keys(&:to_s)
+        key = loop do
+          k = "ag_#{SecureRandom.hex(4)}"
+          break k unless AiAgent.exists?(agent_key: k)
         end
-        agent
+
+        record = AiAgent.new(column_attrs(attrs).merge(agent_key: key))
+        record.save!
+        to_hash(record)
       end
 
       def update(key, attrs)
-        updated = nil
-        mutate do |list|
-          idx = list.index { |a| a['key'] == key.to_s }
-          updated = list[idx] = normalize(list[idx].merge(attrs.transform_keys(&:to_s))) if idx
-        end
-        updated
+        record = record_for(key)
+        return nil unless record
+
+        was, cron_was = record.updated_at, record.cron
+        record.update!(column_attrs(attrs.transform_keys(&:to_s)))
+        # The scheduler reads updated_at as when the schedule was set, so an
+        # edit that leaves the cron alone must not re-arm that guard.
+        record.update_column(:updated_at, was) if was && record.cron == cron_was
+        to_hash(record)
       end
 
-      # Takes everything keyed to the agent with it: its chat history (via the
-      # AiAgent row) and its run log.
+      # Takes everything keyed to the agent with it: its chat history (rows
+      # cascade off the AiAgent) and its run log.
       def delete(key)
-        agent = find(key)
-        return false unless agent
+        record = record_for(key)
+        return false unless record
 
-        mutate { |list| list.reject! { |a| a['key'] == key.to_s } }
-        AiAgent.find_by(id: agent['ai_agent_id'])&.destroy if agent['ai_agent_id'].present?
-        AgentRun.for_agent(key).delete_all
+        record.destroy
+        AiAgentRun.for_agent(key).delete_all
         true
       end
 
-      def last_run(agent_key)
-        AgentRun.for_agent(agent_key).recent_first.first
+      # The page shows failed runs, so clearing the history clears the log too.
+      # A claim the scheduler could still re-derive is blanked instead of
+      # deleted: deleting it hands the occurrence back to the next tick.
+      def clear_runs(agent_key)
+        scope = AiAgentRun.for_agent(agent_key)
+        scope.where.not(id: live_claim_ids(scope)).delete_all
+        scope.update_all(status: CLEARED_STATUS, error: nil, reply_excerpt: nil)
+      end
+
+      # Everything kept for this agent — prune_runs already caps the window.
+      def runs(agent_key)
+        AiAgentRun.for_agent(agent_key).recent_first.limit(MAX_RUNS_PER_AGENT)
       end
 
       # Claims this agent's slot for this minute. The unique index on stamp
@@ -124,10 +127,19 @@ module RedmineAgent
       # both run the same schedule — the loser's INSERT is rejected. Returns
       # nil when the slot is already taken.
       def claim_run(agent_key, stamp)
-        AgentRun.create!(agent_key: agent_key, stamp: stamp,
+        AiAgentRun.create!(agent_key: agent_key, stamp: stamp,
                          status: 'started', started_at: Time.now)
       rescue ActiveRecord::RecordNotUnique
         nil
+      end
+
+      # A claim whose process died mid-run: nothing else ever moves it off
+      # 'started'. Whether it wrote anything first is unknowable, so it is shown
+      # but not retried.
+      def fail_stale_runs(cutoff)
+        AiAgentRun.where(status: 'started')
+                  .where('started_at < ?', cutoff)
+                  .update_all(status: PARTIAL_ERROR_STATUS, error: 'run interrupted')
       end
 
       # Updates the claimed row for this stamp, or inserts one for a manual run.
@@ -138,11 +150,11 @@ module RedmineAgent
           error:         record['error']
         }.compact
 
-        run = record['stamp'].present? ? AgentRun.find_by(stamp: record['stamp']) : nil
+        run = record['stamp'].present? ? AiAgentRun.find_by(stamp: record['stamp']) : nil
         if run
           run.update(attrs)
         else
-          AgentRun.create!(attrs.merge(agent_key: record['key'], stamp: record['stamp'],
+          AiAgentRun.create!(attrs.merge(agent_key: record['key'], stamp: record['stamp'],
                                        started_at: record['started_at'] || Time.now))
         end
         prune_runs(record['key'])
@@ -152,46 +164,12 @@ module RedmineAgent
         record
       end
 
-      # Find-or-create the AiAgent row this agent's chat history is scoped to,
-      # persisting the id back onto the agent record.
-      def ai_agent_record(agent)
-        if agent['ai_agent_id'].present? && (rec = AiAgent.find_by(id: agent['ai_agent_id']))
-          return rec
-        end
-
-        rec = AiAgent.named(agent['name']).first
-        rec ||= begin
-          AiAgent.create!(name: agent['name'], description: agent['task'].to_s.truncate(255))
-        rescue ActiveRecord::RecordInvalid, ActiveRecord::RecordNotUnique
-          AiAgent.named(agent['name']).first ||
-            AiAgent.create!(name: "#{agent['name']} (#{agent['key']})", description: agent['task'].to_s.truncate(255))
-        end
-        update(agent['key'], 'ai_agent_id' => rec.id) if rec
-        rec
-      end
-
-      # Carries a rename/retask onto the linked AiAgent row — the mobile
-      # /redmine_agent/agents list reads the name from there.
-      def sync_ai_agent!(agent)
-        return unless agent && agent['ai_agent_id'].present?
-
-        rec = AiAgent.find_by(id: agent['ai_agent_id'])
-        return unless rec
-
-        attrs = { name: agent['name'], description: agent['task'].to_s.truncate(255) }
-        # An orphan row may already hold the name — same fallback as #ai_agent_record.
-        rec.update(attrs) || rec.update(attrs.merge(name: "#{agent['name']} (#{agent['key']})"))
-        rec
-      rescue ActiveRecord::RecordNotUnique
-        nil
-      end
-
       # Reconciles the registered :ai_agent_* menu items against the current
       # agent list. Cheap no-op when nothing changed (the common case, since
       # this runs on every relevant request so every app worker stays in
       # sync without a restart).
       def sync_menu!
-        desired = all.map { |a| [a['key'], a['name'].to_s] }
+        desired = AiAgent.agents.order(:id).pluck(:agent_key, :name, :created_by_id)
         return if desired == @menu_signature
 
         SYNC_MUTEX.synchronize do
@@ -201,10 +179,12 @@ module RedmineAgent
           present = mapper.menu_items.children.map(&:name).select { |n| n.to_s.start_with?('ai_agent_') }
           wanted = desired.map { |k, _| :"ai_agent_#{k}" }
           (present - wanted).each { |n| mapper.delete(n) }
-          desired.each do |k, name|
+          desired.each do |k, name, created_by|
             mapper.push(:"ai_agent_#{k}",
                         { controller: 'redmine_agent', action: 'index', agent_key: k },
-                        caption: name, if: Proc.new { User.current.logged? })
+                        # Registration is process-wide; this runs per request,
+                        # so each user sees only the agents that are theirs.
+                        caption: name, if: Proc.new { visible?(k, created_by) })
           end
           @menu_signature = desired
         end
@@ -214,39 +194,51 @@ module RedmineAgent
 
       private
 
-      # Drops this agent's oldest runs — the log is a rolling window, not an archive.
+      # Drops this agent's oldest runs — the log is a rolling window, not an
+      # archive. A live claim is never dropped, however old the row is.
       def prune_runs(agent_key)
-        stale = AgentRun.for_agent(agent_key).recent_first.offset(MAX_RUNS_PER_AGENT).pluck(:id)
-        AgentRun.where(id: stale).delete_all if stale.any?
+        scope = AiAgentRun.for_agent(agent_key)
+        stale = scope.recent_first.offset(MAX_RUNS_PER_AGENT).pluck(:id) - live_claim_ids(scope)
+        AiAgentRun.where(id: stale).delete_all if stale.any?
       end
 
-      def normalize(attrs)
-        attrs.transform_keys(&:to_s).except('notify')
+      # Claims a tick could still re-derive, so deleting one re-runs it. A
+      # manual run's stamp is unique per click and never comes back.
+      def live_claim_ids(scope)
+        cutoff = Time.now - RedmineAgent::Scheduler::CATCHUP_WINDOW
+        scope.where('started_at >= ?', cutoff).pluck(:id, :stamp)
+             .select { |_id, stamp| stamp.to_s.match?(RedmineAgent::Scheduler::OCCURRENCE_STAMP) }
+             .map(&:first)
       end
 
-      def mutate(list_key: 'custom_agents')
-        MUTEX.synchronize do
-          Setting.check_cache
-          s = Setting.plugin_redmine_agent.deep_dup
-          list = Array(s[list_key]).dup
-          yield list
-          s[list_key] = list
-          Setting.plugin_redmine_agent = s
+      def to_hash(record)
+        {
+          'key'         => record.agent_key,
+          'name'        => record.name,
+          'task'        => record.task.to_s,
+          'cron'        => record.cron.presence,
+          'created_by'  => record.created_by_id,
+          'created_at'  => record.created_at&.utc&.iso8601,
+          # A Time, not a string: the scheduler compares it against an
+          # occurrence to ignore ones that predate the schedule.
+          'updated_at'  => record.updated_at,
+          'ai_agent_id' => record.id
+        }
+      end
+
+      # Only the keys actually given are mapped, so a partial update never
+      # blanks a field it was not asked about.
+      def column_attrs(attrs)
+        out = {}
+        out[:name] = attrs['name'].to_s.strip if attrs.key?('name')
+        out[:cron] = attrs['cron'].presence   if attrs.key?('cron')
+        out[:created_by_id] = attrs['created_by'] if attrs.key?('created_by')
+        if attrs.key?('task')
+          out[:task] = attrs['task'].to_s
+          # The mobile agent list reads the description, not the task.
+          out[:description] = attrs['task'].to_s.truncate(255)
         end
-      end
-
-      def seed!
-        return if Setting.plugin_redmine_agent['custom_agents_seeded'].to_s == '1'
-        MUTEX.synchronize do
-          Setting.check_cache
-          s = Setting.plugin_redmine_agent.deep_dup
-          next if s['custom_agents_seeded'].to_s == '1'
-
-          seeded = BUILT_INS.map { |b| b.merge('enabled' => true, 'created_at' => Time.now.utc.iso8601) }
-          s['custom_agents'] = seeded + Array(s['custom_agents'])
-          s['custom_agents_seeded'] = '1'
-          Setting.plugin_redmine_agent = s
-        end
+        out
       end
     end
   end
