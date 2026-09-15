@@ -28,6 +28,7 @@ class RedmineAgentController < ApplicationController
 
   before_action :require_login
   before_action :require_admin, only: [:test_model, :test_mcp_server]
+  before_action :check_add_agent_perm, only: [:create_agent]
   before_action :set_agent, only: [:index, :chat_request, :history, :clear]
   before_action :set_managed_agent, only: [:update_agent, :destroy_agent, :run_agent, :agent_runs]
   before_action :sync_agent_menu
@@ -326,6 +327,13 @@ class RedmineAgentController < ApplicationController
     key = params[:agent_key].to_s.presence || RedmineAgent::CustomAgents::QUERY_AGENT_KEY
     @agent = RedmineAgent::CustomAgents.find(key)
     render_404 unless @agent && RedmineAgent::CustomAgents.visible?(@agent['key'], @agent['created_by'])
+  end
+
+  # The "+" button is hidden without the privilege; this stops a hand-made POST.
+  def check_add_agent_perm
+    return if can_add_agent?
+
+    render json: { error: l(:error_agent_add_not_allowed) }, status: :forbidden
   end
 
   # The agent a management action targets. Managing one is the creator's alone

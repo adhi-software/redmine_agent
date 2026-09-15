@@ -24,6 +24,11 @@ module RedmineAgentHelper
   # The history panel's window; a page asks for the few it actually renders.
   MAX_CHATS = 500
 
+  # Group-held, with no admin bypass - the same gate erpmine_resident uses.
+  def can_add_agent?
+    Object.new.extend(WktimeHelper).validateERPPermission('ADD_AGT')
+  end
+
   def render_markdown(text)
     text = text.to_s
     text = text.encode(Encoding::UTF_8) unless text.encoding == Encoding::UTF_8

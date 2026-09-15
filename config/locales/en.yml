@@ -106,3 +106,8 @@ en:
   error_agent_invalid_schedule: Please enter a valid schedule time.
   error_agent_unknown: Unknown agent.
   error_agent_not_allowed: Only the user who created this agent can manage it.
+  error_agent_add_not_allowed: You are not allowed to add agents.
+
+  # Group permission tab: the fieldset legend, then the permission's own name as its key.
+  label_ai: AI
+  ADD AGENT: Add Agent
