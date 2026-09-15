@@ -32,6 +32,19 @@
   end
 
   is_mcp_install = agent_helper.mcp_installed?
+
+  # The built-in Redmine MCP server is not stored in settings — it is shown as a
+  # fixed, read-only first row so the list matches what the chat actually reaches.
+  mcp_locked_rows = []
+  if is_mcp_install
+    builtin_name = l(:label_agent_mcp_builtin_name)
+    builtin_url  = "#{RedmineAgent::AppUrl.base}/mcp"
+    mcp_locked_rows << {
+      name: builtin_name,
+      url:  builtin_url,
+      text: "#{builtin_name}  |  #{builtin_url}  |  (#{l(:label_agent_mcp_builtin_suffix)})"
+    }
+  end
 %>
 
 <div class="agent-config-row" style="display:flex; align-items:flex-start; padding:3px 0;">
@@ -70,7 +83,7 @@
 
 <div class="agent-config-row" style="display:flex; align-items:flex-start; padding:3px 0;">
   <label for="settings_mcp_servers" style="flex:0 0 295px; width:295px; margin:0 5px 0 0; float:none; text-align:end; font-weight:bold; line-height:24px;"><%= l(:label_agent_mcp_servers) %></label>
-  <div style="flex:1 1 auto; min-width:0;">
+  <div style="flex:1 1 auto; min-width:0; display:flex; flex-wrap:wrap; gap:14px; align-items:flex-start;">
     <%# Posted even when every row is removed, so deleting the last one sticks. %>
     <%= hidden_field_tag 'settings[mcp_servers][]', '', id: nil %>
     <%= select_tag 'settings[mcp_servers]',
@@ -78,6 +91,7 @@
           multiple: true, size: 6, id: 'settings_mcp_servers',
           class: 'multi-row', style: 'display:none;' %>
     <ul id="settings_mcp_servers_view" class="agents-sortable"></ul>
+    <span class="mcp-hint"><%= l(:label_agent_mcp_servers_hint) %></span>
   </div>
 </div>
 <p>
@@ -137,8 +151,20 @@
   }
   .agents-sortable .agent-item.selected .agent-handle { color: #e6f0fa; }
   .agents-sortable .agent-item.selected { background: #3b93d9; color: #fff; }
+  /* The built-in server: selectable and viewable, never edited or dragged.
+     user-select off: without it, dragging the row starts a text drag instead. */
+  .agents-sortable .agent-item.locked {
+    cursor: pointer; color: #777; font-style: italic;
+    -webkit-user-select: none; user-select: none;
+  }
+  .agents-sortable .agent-item.locked.selected { color: #fff; }
   .agents-sortable .agent-item.dragging { opacity: 0.4; }
   .agents-sortable .agent-item.drop-target { border-top: 2px solid #3b93d9; }
+
+  .mcp-builtin-note { color: #555; font-size: 0.9em; line-height: 1.4; }
+
+  /* Sits beside the list; wraps under it when the form is narrow. */
+  .mcp-hint { flex: 1 1 240px; max-width: 360px; line-height: 1.5; }
 
   /* Only shown while testing and on failure — success speaks through the icon. */
   .agent-test-status { display: inline-block; margin-top: 6px; font-size: 1.1em; }
@@ -199,7 +225,7 @@
       <th align="left" style="width:90px; white-space:nowrap; vertical-align:top;"><label><%= l(:label_agent_mcp_token) %></label></th>
       <td><%= password_field_tag 'mcp_token', '', id: 'mcp_token', autocomplete: 'off', style: 'width:100%; box-sizing:border-box;' %></td>
     </tr>
-    <tr>
+    <tr id="mcp-conn-row">
       <th align="left" style="width:90px; white-space:nowrap; vertical-align:top;"><label><%= l(:label_agent_mcp_connection) %></label></th>
       <td>
         <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
@@ -208,6 +234,10 @@
         </div>
         <span id="mcp-test-status" class="agent-test-status"></span>
       </td>
+    </tr>
+    <%# Shown only for the built-in row, which has no token of its own to show. %>
+    <tr id="mcp-builtin-note" style="display:none;">
+      <td colspan="2" class="mcp-builtin-note"><%= l(:label_agent_mcp_builtin_readonly) %></td>
     </tr>
   </table>
 </div>
@@ -237,17 +267,39 @@ var LBL_MCP_URL_FIELD = "<%= escape_javascript(l(:label_agent_mcp_server_url)) %
 var LBL_MCP_TESTING   = "<%= escape_javascript(l(:label_agent_mcp_testing)) %>";
 var LBL_MCP_TEST_FAIL = "<%= escape_javascript(l(:label_agent_mcp_test_fail)) %>";
 var MCP_TEST_URL      = "<%= escape_javascript(url_for(controller: '/redmine_agent', action: 'test_mcp_server')) %>";
+// Rows rendered in the MCP list but not stored in settings; read-only.
+var MCP_LOCKED_ROWS      = <%= raw mcp_locked_rows.to_json %>;
+var LBL_MCP_BUILTIN_LOCKED = "<%= escape_javascript(l(:label_agent_mcp_builtin_locked)) %>";
 
 // Shared behaviour for the two config listboxes (LLM configs, MCP servers):
 // render, select, drag-reorder, delete, and post every row back on save.
 // onEdit is what a double-click on a row opens.
-function configList(boxId, viewId, onEdit) {
-  var box = document.getElementById(boxId);
-  var ul  = document.getElementById(viewId);
+// lockedRows are read-only rows drawn first. They can be selected and opened,
+// but they are not options, so they are never reordered, deleted or posted.
+function configList(boxId, viewId, onEdit, lockedRows) {
+  var box    = document.getElementById(boxId);
+  var ul     = document.getElementById(viewId);
+  var locked = lockedRows || [];
+  // Which locked row is highlighted; -1 when a real row (or nothing) is.
+  var lockedIndex = -1;
   if (!box || !ul) { return null; }
 
   function render() {
     ul.innerHTML = "";
+    for (var j = 0; j < locked.length; j++) {
+      var lockedLi = document.createElement("li");
+      lockedLi.className = "agent-item locked" + (j === lockedIndex ? " selected" : "");
+      lockedLi.dataset.locked = j;
+      lockedLi.draggable = false;
+
+      var lockedText = document.createElement("span");
+      lockedText.className = "agent-text";
+      lockedText.textContent = locked[j].text;
+
+      lockedLi.appendChild(lockedText);
+      ul.appendChild(lockedLi);
+    }
+
     for (var i = 0; i < box.options.length; i++) {
       var li = document.createElement("li");
       li.className = "agent-item" + (i === box.selectedIndex ? " selected" : "");
@@ -273,12 +325,15 @@ function configList(boxId, viewId, onEdit) {
     if (from === to || isNaN(from) || isNaN(to)) { return; }
     var moving = box.options[from], target = box.options[to];
     box.insertBefore(moving, from < to ? target.nextSibling : target);
+    lockedIndex = -1;
     box.selectedIndex = Array.prototype.indexOf.call(box.options, moving);
     render();
   }
 
   function remove() {
-    if (box.selectedIndex >= 0) {
+    if (lockedIndex >= 0) {
+      alert(LBL_MCP_BUILTIN_LOCKED);
+    } else if (box.selectedIndex >= 0) {
       if (confirm(LBL_AGENT_DELETE)) {
         for (var i = box.options.length - 1; i >= 0; i--) {
           if (box.options[i].selected) { box.remove(i); }
@@ -299,15 +354,38 @@ function configList(boxId, viewId, onEdit) {
     });
   }
 
-  var itemAt = function (e) { return e.target.closest("li.agent-item"); };
+  // A dragged text selection targets a text node, which has no closest().
+  var rowAt = function (e) {
+    var node = e.target;
+    if (node && node.nodeType !== 1) { node = node.parentElement; }
+    return node && node.closest("li.agent-item");
+  };
+  // Real rows only — a locked row has no index, so it is never dragged or
+  // dropped on, and the delete/save paths never see it.
+  var itemAt = function (e) {
+    var li = rowAt(e);
+    return (li && li.dataset.index !== undefined) ? li : null;
+  };
+
+  // Selecting a row clears the other kind of selection: only one is ever lit.
+  function select(li) {
+    if (li.dataset.index !== undefined) {
+      lockedIndex = -1;
+      box.selectedIndex = +li.dataset.index;
+    } else {
+      lockedIndex = +li.dataset.locked;
+      box.selectedIndex = -1;
+    }
+    render();
+  }
 
   ul.addEventListener("click", function (e) {
-    var li = itemAt(e);
-    if (li) { box.selectedIndex = +li.dataset.index; render(); }
+    var li = rowAt(e);
+    if (li) { select(li); }
   });
   ul.addEventListener("dblclick", function (e) {
-    var li = itemAt(e);
-    if (li) { box.selectedIndex = +li.dataset.index; onEdit(); }
+    var li = rowAt(e);
+    if (li) { select(li); onEdit(); }
   });
 
   // Native HTML5 drag-and-drop reordering.
@@ -343,7 +421,10 @@ function configList(boxId, viewId, onEdit) {
   });
 
   render();
-  return { box: box, render: render, remove: remove };
+  return {
+    box: box, render: render, remove: remove,
+    lockedIndex: function () { return lockedIndex; }
+  };
 }
 
 var agentList = null;
@@ -456,6 +537,14 @@ function agentNameExists(box, name, skipIndex) {
   return false;
 }
 
+// The built-in row is not in the listbox, so its name is checked separately —
+// a second "Redmine" server would collide in tool routing.
+function mcpNameReserved(name) {
+  return MCP_LOCKED_ROWS.some(function (r) {
+    return r.name.toLowerCase() === name.toLowerCase();
+  });
+}
+
 function mcpMaskedLabel(n, u, t) {
   var label = n;
   if (u) { label += "  |  " + u; }
@@ -527,7 +616,9 @@ function ensureMcpDialog() {
 
         if (name === "") { alert(LBL_AGENT_NAME + " " + LBL_AGENT_INVALID); return; }
         if (url === "") { alert(LBL_MCP_URL_FIELD + " " + LBL_AGENT_INVALID); return; }
-        if (agentNameExists(box, name, editIndex)) { alert(LBL_AGENT_DUPLICATE); return; }
+        if (mcpNameReserved(name) || agentNameExists(box, name, editIndex)) {
+          alert(LBL_AGENT_DUPLICATE); return;
+        }
 
         function save() {
           var opt;
@@ -560,9 +651,22 @@ function ensureMcpDialog() {
   return $dlg;
 }
 
+// Read-only view of the built-in row: fields locked, note shown, and no Ok —
+// its token is the viewer's own API key, so Test connection has nothing to send.
+function setMcpReadonly($dlg, readonly) {
+  ["mcp_name", "mcp_url", "mcp_token"].forEach(function (id) {
+    document.getElementById(id).disabled = !!readonly;
+  });
+  document.getElementById("mcp-conn-row").style.display    = readonly ? "none" : "";
+  document.getElementById("mcp-builtin-note").style.display = readonly ? "" : "none";
+  // Ok is the first button the dialog was built with.
+  $dlg.dialog("widget").find(".ui-dialog-buttonpane button").first().toggle(!readonly);
+}
+
 function showMcpDialog(action) {
   var box = mcpListbox();
   var $dlg = ensureMcpDialog();
+  var lockedIdx = mcpList ? mcpList.lockedIndex() : -1;
   if ("Add" === action) {
     mcpAction = action;
     document.getElementById("mcp_name").value = "";
@@ -570,6 +674,16 @@ function showMcpDialog(action) {
     document.getElementById("mcp_token").value = "";
     resetMcpTestStatus();
     setMcpConnected(false);
+    setMcpReadonly($dlg, false);
+    $dlg.dialog("open");
+  } else if ("Edit" === action && lockedIdx >= 0) {
+    mcpAction = "View";
+    document.getElementById("mcp_name").value  = MCP_LOCKED_ROWS[lockedIdx].name;
+    document.getElementById("mcp_url").value   = MCP_LOCKED_ROWS[lockedIdx].url;
+    document.getElementById("mcp_token").value = "";
+    resetMcpTestStatus();
+    setMcpConnected(false);
+    setMcpReadonly($dlg, true);
     $dlg.dialog("open");
   } else if ("Edit" === action && box != null && box.selectedIndex >= 0) {
     mcpAction = action;
@@ -579,6 +693,7 @@ function showMcpDialog(action) {
     document.getElementById("mcp_token").value = parts[2] || "";
     resetMcpTestStatus();
     setMcpConnected(parts[3] === "1");
+    setMcpReadonly($dlg, false);
     $dlg.dialog("open");
   } else if (box != null && box.options.length > 0) {
     alert(LBL_AGENT_SELECT);
@@ -699,7 +814,7 @@ function removeSelectedAgent() { if (agentList) { agentList.remove(); } }
   agentList = configList("settings_agents", "settings_agents_view",
                          function () { showAgentDialog("Edit"); });
   mcpList   = configList("settings_mcp_servers", "settings_mcp_servers_view",
-                         function () { showMcpDialog("Edit"); });
+                         function () { showMcpDialog("Edit"); }, MCP_LOCKED_ROWS);
 })();
 //]]>
 </script>

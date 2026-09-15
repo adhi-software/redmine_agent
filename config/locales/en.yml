@@ -56,10 +56,17 @@ en:
   label_agent_agent_name: Name
   label_agent_agent_task: Task / instructions
   label_agent_agent_task_hint: "What should this agent do? This becomes its instructions."
+  label_agent_task_samples_link: "See sample prompts"
+  label_agent_task_samples_hide: "Hide sample prompts"
+  label_agent_task_sample_1_title: "Clock-in check → Slack"
+  label_agent_task_sample_1: "Every weekday at 10 am, list the employees who have not clocked in yet and post the list to the #employees Slack channel."
+  label_agent_task_sample_2_title: "Timesheet reminder → Email"
+  label_agent_task_sample_2: "Every Friday at 6 pm, find the users who have not submitted their timesheet for this week and email each of them a reminder."
+  label_agent_task_delivery_hint: "Mention the delivery in the instruction too — where the result should go (a Slack channel, a Slack DM, or email)."
   label_agent_notify_channels: "Notification channels available: %{channels}"
   label_agent_agent_schedule: Schedule
   label_agent_schedule_frequency: Frequency
-  label_agent_schedule_none: No schedule
+  label_agent_schedule_once: Run once
   label_agent_schedule_hourly: Hourly
   label_agent_schedule_every: Every
   label_agent_schedule_hours: hours at minute
@@ -88,6 +95,11 @@ en:
   label_agent_mcp_testing: "Connecting..."
   label_agent_mcp_test_fail: Could not connect to the MCP server.
   label_agent_mcp_tools_found: "%{count} tools available."
+  label_agent_mcp_builtin_name: Redmine
+  label_agent_mcp_builtin_suffix: default
+  label_agent_mcp_servers_hint: "Note: You can configure your popular MCP servers here (Slack, Gmail, GitHub, etc.)"
+  label_agent_mcp_builtin_readonly: "Built-in server — it cannot be changed, and it signs in with your own Redmine API key."
+  label_agent_mcp_builtin_locked: The built-in server cannot be changed.
   error_agent_name_blank: Please enter a name.
   error_agent_task_blank: Please enter a task.
   error_agent_name_taken: An agent with this name already exists.

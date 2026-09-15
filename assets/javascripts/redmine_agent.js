@@ -556,10 +556,17 @@ document.addEventListener('DOMContentLoaded', function () {
     agentName: page.getAttribute('data-i18n-agent-name'),
     agentTask: page.getAttribute('data-i18n-agent-task'),
     agentTaskHint: page.getAttribute('data-i18n-agent-task-hint'),
+    samplesLink: page.getAttribute('data-i18n-task-samples-link'),
+    samplesHide: page.getAttribute('data-i18n-task-samples-hide'),
+    sample1Title: page.getAttribute('data-i18n-task-sample-1-title'),
+    sample1: page.getAttribute('data-i18n-task-sample-1'),
+    sample2Title: page.getAttribute('data-i18n-task-sample-2-title'),
+    sample2: page.getAttribute('data-i18n-task-sample-2'),
+    deliveryHint: page.getAttribute('data-i18n-task-delivery-hint'),
     notifyChannels: page.getAttribute('data-notify-channels'),
     agentSchedule: page.getAttribute('data-i18n-agent-schedule'),
     freqLabel: page.getAttribute('data-i18n-schedule-frequency'),
-    freqNone: page.getAttribute('data-i18n-schedule-none'),
+    freqOnce: page.getAttribute('data-i18n-schedule-once'),
     freqHourly: page.getAttribute('data-i18n-schedule-hourly'),
     everyLabel: page.getAttribute('data-i18n-schedule-every'),
     hoursLabel: page.getAttribute('data-i18n-schedule-hours'),
@@ -802,7 +809,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
   function parseCronForForm(cron) {
     if (!cron) {
-      return { frequency: 'none', time: '09:00', weekday: '0', day: '1',
+      return { frequency: 'once', time: '09:00', weekday: '0', day: '1',
                every: '4', minute: '0', timezone: defaultTimezone };
     }
     var parts = cron.trim().split(/\s+/);
@@ -878,8 +885,44 @@ document.addEventListener('DOMContentLoaded', function () {
 
     var taskHint = document.createElement('p');
     taskHint.className = 'agent-form-hint';
-    taskHint.textContent = ai18n.agentTaskHint;
+    taskHint.textContent = ai18n.agentTaskHint + ' ';
+    var samplesLink = document.createElement('a');
+    samplesLink.className = 'agent-form-samples-link';
+    samplesLink.href = '#';
+    samplesLink.textContent = ai18n.samplesLink;
+    taskHint.appendChild(samplesLink);
     form.appendChild(taskHint);
+
+    // Read-only samples, so a user knows what a task looks like.
+    var examples = document.createElement('div');
+    examples.className = 'agent-form-examples';
+    examples.hidden = true;
+    [[ai18n.sample1Title, ai18n.sample1], [ai18n.sample2Title, ai18n.sample2]].forEach(function (pair) {
+      if (!pair[1]) return;
+      var item = document.createElement('div');
+      item.className = 'agent-form-example';
+      var itemTitle = document.createElement('span');
+      itemTitle.className = 'agent-form-example-title';
+      itemTitle.textContent = pair[0];
+      item.appendChild(itemTitle);
+      var itemText = document.createElement('span');
+      itemText.textContent = pair[1];
+      item.appendChild(itemText);
+      examples.appendChild(item);
+    });
+    if (ai18n.deliveryHint) {
+      var delivery = document.createElement('span');
+      delivery.className = 'agent-form-examples-note';
+      delivery.textContent = ai18n.deliveryHint;
+      examples.appendChild(delivery);
+    }
+    form.appendChild(examples);
+
+    samplesLink.addEventListener('click', function (e) {
+      e.preventDefault();
+      examples.hidden = !examples.hidden;
+      samplesLink.textContent = examples.hidden ? ai18n.samplesLink : ai18n.samplesHide;
+    });
 
     // Blank unless MCP servers are configured — those are the notify channels.
     if (ai18n.notifyChannels) {
@@ -897,10 +940,10 @@ document.addEventListener('DOMContentLoaded', function () {
     var schedFields = document.createElement('div');
     schedFields.className = 'agent-sched-fields';
 
-    // 'none' replaces the old on/off checkbox — it is how an agent is left unscheduled.
+    // 'once' is no schedule at all — the agent is run from its Run now button.
     var freqSelect = document.createElement('select');
     freqSelect.className = 'multi-row';
-    [['none', ai18n.freqNone], ['hourly', ai18n.freqHourly], ['daily', ai18n.freqDaily], ['weekdays', ai18n.freqWeekdays], ['weekly', ai18n.freqWeekly], ['monthly', ai18n.freqMonthly]]
+    [['once', ai18n.freqOnce], ['hourly', ai18n.freqHourly], ['daily', ai18n.freqDaily], ['weekdays', ai18n.freqWeekdays], ['weekly', ai18n.freqWeekly], ['monthly', ai18n.freqMonthly]]
       .forEach(function (pair) {
         var opt = document.createElement('option');
         opt.value = pair[0];
@@ -1006,7 +1049,7 @@ document.addEventListener('DOMContentLoaded', function () {
     function syncSchedVisibility() {
       // Hourly sets its own minute, and its hour is the interval — no time of day.
       intervalRow.hidden = freqSelect.value !== 'hourly';
-      timeRow.hidden = freqSelect.value === 'none' || freqSelect.value === 'hourly';
+      timeRow.hidden = freqSelect.value === 'once' || freqSelect.value === 'hourly';
       weekdayRow.hidden = freqSelect.value !== 'weekly';
       dayRow.hidden = freqSelect.value !== 'monthly';
     }
@@ -1039,7 +1082,7 @@ document.addEventListener('DOMContentLoaded', function () {
       errorMsg.textContent = '';
       if (!name) { errorMsg.textContent = ai18n.errNameBlank; return; }
       if (!task) { errorMsg.textContent = ai18n.errTaskBlank; return; }
-      var needsTime = freqSelect.value !== 'none' && freqSelect.value !== 'hourly';
+      var needsTime = freqSelect.value !== 'once' && freqSelect.value !== 'hourly';
       if (needsTime && !timeInput.value) { errorMsg.textContent = ai18n.errSchedule; return; }
 
       var payload = {
@@ -1050,7 +1093,7 @@ document.addEventListener('DOMContentLoaded', function () {
       if (freqSelect.value === 'hourly') {
         payload.every = everySelect.value;
         payload.minute = minuteSelect.value;
-      } else if (freqSelect.value !== 'none') {
+      } else if (freqSelect.value !== 'once') {
         payload.time = timeInput.value;
         payload.weekday = weekdaySelect.value;
         payload.day = daySelect.value;

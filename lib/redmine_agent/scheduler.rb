@@ -6,10 +6,9 @@ module RedmineAgent
   # 'cron' set). Runs in-process with the Rails web server — started once from
   # init.rb's after_initialize hook.
   class Scheduler
-    # How late a missed occurrence may still be run. Long enough to cover a
-    # restart or a short outage, short enough that a weekend of downtime does
-    # not fire Friday's reminder on Monday.
-    CATCHUP_WINDOW = 6 * 60 * 60
+    # How late an occurrence may still be claimed: one tick's slack, so a tick
+    # that fires late still lands it. A missed occurrence is not backfilled.
+    TICK_GRACE = 2 * 60
 
     # Marks the one retry a failed occurrence gets.
     RETRY_SUFFIX = ' retry'.freeze
@@ -45,9 +44,8 @@ module RedmineAgent
       private
 
       # Works off the last scheduled occurrence rather than the current
-      # minute, so a tick that fires late — or a server that was down when the
-      # minute passed — still runs the job, once, if it is back inside
-      # CATCHUP_WINDOW.
+      # minute, so a tick that fires a second or two late still runs the job,
+      # once. Anything older than TICK_GRACE is gone, not deferred.
       def run_due_agents
         Setting.check_cache
         now = Time.now
@@ -68,13 +66,13 @@ module RedmineAgent
           # Asia/Kolkata resolves to the right wall-clock time whatever the
           # server's zone is.
           due = cron.previous_time(now).to_t
-          next if now - due > CATCHUP_WINDOW
+          next if now - due > TICK_GRACE
           # An occurrence older than the schedule itself was never due.
           next if agent['updated_at'] && due < agent['updated_at']
 
-          # Stamping the occurrence, not the tick, is what makes a catch-up
-          # run exactly once: every later tick in the window derives the same
-          # stamp and loses the claim.
+          # Stamping the occurrence, not the tick, is what makes it run
+          # exactly once: a second worker — or the next tick, still inside the
+          # grace — derives the same stamp and loses the claim.
           stamp = claimable_stamp("#{agent['key']}@#{due.utc.strftime('%Y-%m-%d %H:%M')}")
           next unless stamp
           next unless RedmineAgent::Runner.reachable?
@@ -87,10 +85,9 @@ module RedmineAgent
       end
 
       # The stamp to claim for this occurrence, or nil when there is nothing
-      # left to do — which is every tick in the window after the run, so the
-      # doomed INSERT and the reachability probe are skipped. A run that
-      # failed gets one more attempt, under its own stamp so both stay in the
-      # history.
+      # left to do — which is the next tick after the run, so the doomed
+      # INSERT and the reachability probe are skipped. A run that failed gets
+      # one more attempt, under its own stamp so both stay in the history.
       def claimable_stamp(stamp)
         run = AiAgentRun.find_by(stamp: stamp)
         return stamp if run.nil?

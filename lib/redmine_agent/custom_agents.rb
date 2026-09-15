@@ -205,7 +205,7 @@ module RedmineAgent
       # Claims a tick could still re-derive, so deleting one re-runs it. A
       # manual run's stamp is unique per click and never comes back.
       def live_claim_ids(scope)
-        cutoff = Time.now - RedmineAgent::Scheduler::CATCHUP_WINDOW
+        cutoff = Time.now - RedmineAgent::Scheduler::TICK_GRACE
         scope.where('started_at >= ?', cutoff).pluck(:id, :stamp)
              .select { |_id, stamp| stamp.to_s.match?(RedmineAgent::Scheduler::OCCURRENCE_STAMP) }
              .map(&:first)

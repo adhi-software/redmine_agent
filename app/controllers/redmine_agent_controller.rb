@@ -249,7 +249,7 @@ class RedmineAgentController < ApplicationController
     return render json: { error: l(:error_agent_name_taken) }, status: :unprocessable_entity if RedmineAgent::CustomAgents.name_taken?(name)
 
     cron = nil
-    if params[:frequency].to_s.present? && params[:frequency].to_s != 'none'
+    if params[:frequency].to_s.present? && params[:frequency].to_s != 'once'
       cron = build_agent_cron(params)
       return render json: { error: l(:error_agent_invalid_schedule) }, status: :unprocessable_entity unless cron
     end
@@ -280,8 +280,8 @@ class RedmineAgentController < ApplicationController
       attrs['task'] = task
     end
     if params[:frequency].present?
-      attrs['cron'] = params[:frequency].to_s == 'none' ? nil : build_agent_cron(params, agent['cron'])
-      return render json: { error: l(:error_agent_invalid_schedule) }, status: :unprocessable_entity if params[:frequency].to_s != 'none' && attrs['cron'].nil?
+      attrs['cron'] = params[:frequency].to_s == 'once' ? nil : build_agent_cron(params, agent['cron'])
+      return render json: { error: l(:error_agent_invalid_schedule) }, status: :unprocessable_entity if params[:frequency].to_s != 'once' && attrs['cron'].nil?
     end
 
     updated = RedmineAgent::CustomAgents.update(agent['key'], attrs)
