@@ -22,7 +22,7 @@ module RedmineAgent
     MAX_RUNS_PER_AGENT = 50
 
     # A claim the user cleared: kept so the occurrence is not re-run, shown
-    # nowhere, never retried (the Scheduler only retries 'error').
+    # nowhere. It still prevents the scheduler from claiming the occurrence again.
     CLEARED_STATUS = 'cleared'.freeze
 
     # A failure we cannot prove left nothing behind: shown like any other
@@ -75,25 +75,36 @@ module RedmineAgent
 
       def create(attrs)
         attrs = attrs.transform_keys(&:to_s)
-        key = loop do
-          k = "ag_#{SecureRandom.hex(4)}"
-          break k unless AiAgent.exists?(agent_key: k)
+        values = column_attrs(attrs)
+        values[:schedule_changed_at] = Time.now if values[:cron].present?
+        attempts = 0
+        begin
+          attempts += 1
+          key = "ag_#{SecureRandom.hex(4)}"
+          record = AiAgent.new(values.merge(agent_key: key))
+          # Roll back the failed INSERT's savepoint before retrying, including
+          # when a caller has already opened a PostgreSQL transaction.
+          AiAgent.transaction(requires_new: true) { record.save! }
+          to_hash(record)
+        rescue ActiveRecord::RecordNotUnique
+          raise unless attempts < 5 && AiAgent.exists?(agent_key: key)
+          retry
+        rescue ActiveRecord::RecordInvalid
+          # Validation can see a collision before the INSERT. Do not retry
+          # unrelated validation failures (e.g. an existing agent name).
+          raise unless attempts < 5 && record.errors.attribute_names == [:agent_key] &&
+                       record.errors.added?(:agent_key, :taken, value: key)
+          retry
         end
-
-        record = AiAgent.new(column_attrs(attrs).merge(agent_key: key))
-        record.save!
-        to_hash(record)
       end
 
       def update(key, attrs)
         record = record_for(key)
         return nil unless record
 
-        was, cron_was = record.updated_at, record.cron
-        record.update!(column_attrs(attrs.transform_keys(&:to_s)))
-        # The scheduler reads updated_at as when the schedule was set, so an
-        # edit that leaves the cron alone must not re-arm that guard.
-        record.update_column(:updated_at, was) if was && record.cron == cron_was
+        values = column_attrs(attrs.transform_keys(&:to_s))
+        values[:schedule_changed_at] = Time.now if values.key?(:cron) && values[:cron] != record.cron
+        record.update!(values)
         to_hash(record)
       end
 
@@ -104,7 +115,6 @@ module RedmineAgent
         return false unless record
 
         record.destroy
-        AiAgentRun.for_agent(key).delete_all
         true
       end
 
@@ -112,14 +122,15 @@ module RedmineAgent
       # A claim the scheduler could still re-derive is blanked instead of
       # deleted: deleting it hands the occurrence back to the next tick.
       def clear_runs(agent_key)
-        scope = AiAgentRun.for_agent(agent_key)
+        scope = AiAgentRun.for_agent(AiAgent.where(agent_key: agent_key).select(:id))
         scope.where.not(id: live_claim_ids(scope)).delete_all
         scope.update_all(status: CLEARED_STATUS, error: nil, reply_excerpt: nil)
       end
 
       # Everything kept for this agent — prune_runs already caps the window.
       def runs(agent_key)
-        AiAgentRun.for_agent(agent_key).recent_first.limit(MAX_RUNS_PER_AGENT)
+        AiAgentRun.for_agent(AiAgent.where(agent_key: agent_key).select(:id))
+                  .where.not(status: CLEARED_STATUS).recent_first.limit(MAX_RUNS_PER_AGENT)
       end
 
       # Claims this agent's slot for this minute. The unique index on stamp
@@ -127,7 +138,7 @@ module RedmineAgent
       # both run the same schedule — the loser's INSERT is rejected. Returns
       # nil when the slot is already taken.
       def claim_run(agent_key, stamp)
-        AiAgentRun.create!(agent_key: agent_key, stamp: stamp,
+        AiAgentRun.create!(ai_agent: record_for(agent_key), stamp: stamp,
                          status: 'started', started_at: Time.now)
       rescue ActiveRecord::RecordNotUnique
         nil
@@ -139,24 +150,24 @@ module RedmineAgent
       def fail_stale_runs(cutoff)
         AiAgentRun.where(status: 'started')
                   .where('started_at < ?', cutoff)
-                  .update_all(status: PARTIAL_ERROR_STATUS, error: 'run interrupted')
+                  .update_all(status: PARTIAL_ERROR_STATUS, error: 'run interrupted', updated_at: Time.now)
       end
 
-      # Updates the claimed row for this stamp, or inserts one for a manual run.
+      # Both manual and scheduled runs claim a row before starting. Update it
+      # atomically only if it has not been cleared; never resurrect a deleted log.
       def log_run(record)
         attrs = {
           status:        record['status'],
+          finished_at:   Time.now,
           reply_excerpt: record['reply_excerpt'],
           error:         record['error']
         }.compact
 
-        run = record['stamp'].present? ? AiAgentRun.find_by(stamp: record['stamp']) : nil
-        if run
-          run.update(attrs)
-        else
-          AiAgentRun.create!(attrs.merge(agent_key: record['key'], stamp: record['stamp'],
-                                       started_at: record['started_at'] || Time.now))
-        end
+        return record if record['stamp'].blank?
+
+        AiAgentRun.for_agent(AiAgent.where(agent_key: record['key']).select(:id))
+                  .where(stamp: record['stamp']).where.not(status: CLEARED_STATUS)
+                  .update_all(attrs.merge(updated_at: Time.now))
         prune_runs(record['key'])
         record
       rescue => e
@@ -197,7 +208,7 @@ module RedmineAgent
       # Drops this agent's oldest runs — the log is a rolling window, not an
       # archive. A live claim is never dropped, however old the row is.
       def prune_runs(agent_key)
-        scope = AiAgentRun.for_agent(agent_key)
+        scope = AiAgentRun.for_agent(AiAgent.where(agent_key: agent_key).select(:id))
         stale = scope.recent_first.offset(MAX_RUNS_PER_AGENT).pluck(:id) - live_claim_ids(scope)
         AiAgentRun.where(id: stale).delete_all if stale.any?
       end
@@ -220,8 +231,8 @@ module RedmineAgent
           'created_by'  => record.created_by_id,
           'created_at'  => record.created_at&.utc&.iso8601,
           # A Time, not a string: the scheduler compares it against an
-          # occurrence to ignore ones that predate the schedule.
-          'updated_at'  => record.updated_at,
+          # occurrence to ignore ones that predate the current schedule.
+          'schedule_changed_at' => record.schedule_changed_at,
           'ai_agent_id' => record.id
         }
       end

@@ -18,7 +18,7 @@ module RedmineAgent
     class RunFailed < StandardError
       attr_reader :executed
 
-      def initialize(message, executed: false)
+      def initialize(message, executed: nil)
         super(message)
         @executed = executed
       end
@@ -77,21 +77,18 @@ module RedmineAgent
       rescue => e
         Rails.logger.warn "RedmineAgent::Runner failed for #{agent['key']}: #{e.class}: #{e.message}"
         record ||= { 'key' => agent['key'], 'stamp' => stamp }
-        record['status'] = retryable?(e) ? 'error' : CustomAgents::PARTIAL_ERROR_STATUS
+        record['status'] = failed_before_execution?(e) ? 'error' : CustomAgents::PARTIAL_ERROR_STATUS
         record['error']  = e.message.to_s.truncate(200)
         CustomAgents.log_run(record)
       end
 
-      # Only a failure that provably left nothing behind is worth running again. A
-      # read timeout is not one: the chat goes on answering long after we gave up.
-      # An open timeout is — the request never reached the app. Both subclass
-      # Timeout::Error, so the open case has to be named first.
-      def retryable?(error)
+      # Preserve the distinction between a known clean failure and a failure
+      # that may have performed writes, so the creator can review before rerunning.
+      def failed_before_execution?(error)
         case error
-        when RunFailed        then !error.executed
-        when Net::OpenTimeout then true
-        when Timeout::Error   then false
-        else true
+        when RunFailed then error.executed == false
+        when Net::OpenTimeout, SocketError, Errno::ECONNREFUSED then true
+        else false
         end
       end
 
@@ -125,7 +122,12 @@ module RedmineAgent
         # what turns this into an error run.
         unless response.is_a?(Net::HTTPSuccess)
           raise RunFailed.new(body['error'].to_s.presence || "HTTP #{response.code} #{response.message}",
-                              executed: !!body['executed'])
+                              executed: body['executed'])
+        end
+        # A proxy/login page or malformed payload does not prove the task
+        # succeeded, or that it is safe to repeat any writes it may have made.
+        unless body['reply'].is_a?(String) && !body.key?('error')
+          raise RunFailed.new('Invalid chat response: expected a reply string')
         end
         body
       end

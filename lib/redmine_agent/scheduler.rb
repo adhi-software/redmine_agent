@@ -10,16 +10,13 @@ module RedmineAgent
     # that fires late still lands it. A missed occurrence is not backfilled.
     TICK_GRACE = 2 * 60
 
-    # Marks the one retry a failed occurrence gets.
-    RETRY_SUFFIX = ' retry'.freeze
-
-    # The stamp shape run_due_agents builds below, RETRY_SUFFIX included.
+    # Includes historical retry stamps so clearing old logs remains safe.
     # Only a stamp like this can be derived again, so only these have to
     # outlive a cleared log.
     OCCURRENCE_STAMP = /@\d{4}-\d{2}-\d{2} \d{2}:\d{2}( retry)?\z/.freeze
 
     # How long a claimed run may sit at 'started' before it counts as
-    # interrupted — well past the Runner's 5s open + 120s read timeout.
+    # interrupted — well past the Runner's 5s open + 300s read timeout.
     STALE_CLAIM_AFTER = 15 * 60
 
     class << self
@@ -29,10 +26,21 @@ module RedmineAgent
         return if @started_pid == Process.pid
         return if non_server_process?
 
+        scheduler = Rufus::Scheduler.new
+        scheduler.cron('* * * * *') { tick }
+        @scheduler = scheduler
         @started_pid = Process.pid
-        @scheduler = Rufus::Scheduler.new
-        @scheduler.cron('* * * * *') { tick }
         Rails.logger.info 'RedmineAgent::Scheduler started.'
+      rescue StandardError => e
+        # Only clean up this attempt, not a scheduler inherited after a fork.
+        @scheduler = nil
+        @started_pid = nil
+        begin
+          scheduler&.shutdown
+        rescue StandardError => cleanup_error
+          Rails.logger.warn "RedmineAgent::Scheduler cleanup failed: #{cleanup_error.class}: #{cleanup_error.message}"
+        end
+        Rails.logger.warn "RedmineAgent::Scheduler startup failed: #{e.class}: #{e.message}"
       end
 
       def tick
@@ -49,7 +57,7 @@ module RedmineAgent
       def run_due_agents
         Setting.check_cache
         now = Time.now
-        # Failing a dead claim here is what makes it visible and retryable.
+        # Show interrupted runs in history for the creator to review.
         CustomAgents.fail_stale_runs(now - STALE_CLAIM_AFTER)
 
         CustomAgents.all.each do |agent|
@@ -68,7 +76,7 @@ module RedmineAgent
           due = cron.previous_time(now).to_t
           next if now - due > TICK_GRACE
           # An occurrence older than the schedule itself was never due.
-          next if agent['updated_at'] && due < agent['updated_at']
+          next if agent['schedule_changed_at'] && due < agent['schedule_changed_at']
 
           # Stamping the occurrence, not the tick, is what makes it run
           # exactly once: a second worker — or the next tick, still inside the
@@ -81,20 +89,17 @@ module RedmineAgent
           next unless CustomAgents.claim_run(agent['key'], stamp)
 
           RedmineAgent::Runner.run_async(agent, stamp)
+        rescue StandardError => e
+          # One broken agent must not prevent the rest of this tick from running.
+          # Keep any existing claim: dispatch may have started before raising.
+          Rails.logger.warn "RedmineAgent::Scheduler agent #{agent['key']} failed: #{e.class}: #{e.message}"
         end
       end
 
-      # The stamp to claim for this occurrence, or nil when there is nothing
-      # left to do — which is the next tick after the run, so the doomed
-      # INSERT and the reachability probe are skipped. A run that failed gets
-      # one more attempt, under its own stamp so both stay in the history.
+      # Each occurrence gets one attempt, regardless of its outcome. The creator
+      # can rerun a failed task manually using Run Now (a separate stamp).
       def claimable_stamp(stamp)
-        run = AiAgentRun.find_by(stamp: stamp)
-        return stamp if run.nil?
-        return nil unless run.status == 'error'
-
-        retry_stamp = "#{stamp}#{RETRY_SUFFIX}"
-        AiAgentRun.exists?(stamp: retry_stamp) ? nil : retry_stamp
+        AiAgentRun.exists?(stamp: stamp) ? nil : stamp
       end
 
       # A `bin/rails <anything>` process fully boots the app — triggering this same

@@ -6,7 +6,7 @@ class AddScheduledAgents < ActiveRecord::Migration[8.1]
 
   def up
     create_table :ai_agent_runs do |t|
-      t.string   :agent_key, null: false, index: true
+      t.references :ai_agent, null: false, foreign_key: true
       # Unique so two app processes can never both claim the same minute for
       # the same agent — the DB rejects the second INSERT. Never NULL: a
       # SQL Server unique index allows only one of those.
@@ -14,19 +14,23 @@ class AddScheduledAgents < ActiveRecord::Migration[8.1]
       t.string   :status
       t.text     :reply_excerpt
       t.text     :error
+      t.datetime :finished_at
       t.datetime :started_at
       t.timestamps
     end
     add_index :ai_agent_runs, :stamp, unique: true
-    add_index :ai_agent_runs, [:agent_key, :started_at]
+    add_index :ai_agent_runs, [:ai_agent_id, :started_at]
 
     add_column :ai_agents, :agent_key,     :string
     add_column :ai_agents, :task,          :text
     add_column :ai_agents, :cron,          :string
+    add_column :ai_agents, :schedule_changed_at, :datetime
     add_column :ai_agents, :created_by_id, :integer
-    # Not a unique index: SQL Server allows only one NULL in one, and rows left
-    # over from the old two-table split have no key. AiAgent validates it.
-    add_index :ai_agents, :agent_key
+    # Legacy rows may have no key. SQL Server needs a filtered index to allow
+    # several NULLs; the other supported adapters allow them in a unique index.
+    key_index_options = { unique: true }
+    key_index_options[:where] = 'agent_key IS NOT NULL' if connection.adapter_name == 'SQLServer'
+    add_index :ai_agents, :agent_key, **key_index_options
 
     AiAgent.reset_column_information
     seed_default_agent
@@ -34,7 +38,7 @@ class AddScheduledAgents < ActiveRecord::Migration[8.1]
 
   def down
     remove_index :ai_agents, :agent_key
-    remove_columns :ai_agents, :agent_key, :task, :cron, :created_by_id
+    remove_columns :ai_agents, :agent_key, :task, :cron, :schedule_changed_at, :created_by_id
     drop_table :ai_agent_runs
   end
 

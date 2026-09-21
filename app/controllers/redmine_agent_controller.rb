@@ -300,7 +300,7 @@ class RedmineAgentController < ApplicationController
   # The agent's run log — the panel row shows only the last one.
   def agent_runs
     runs = RedmineAgent::CustomAgents.runs(@managed_agent['key']).map do |run|
-      { id: run.id, started_at: run.started_at&.iso8601, status: run.status,
+      { id: run.id, started_at: run.started_at&.iso8601, finished_at: run.finished_at&.iso8601, status: run.status,
         error: run.error, reply_excerpt: run.reply_excerpt }
     end
     render json: { runs: runs }
@@ -315,8 +315,10 @@ class RedmineAgentController < ApplicationController
     # A stamp of its own, so the row is claimed before the browser polls for it.
     stamp = "#{@managed_agent['key']}@manual #{SecureRandom.hex(4)}"
     run   = RedmineAgent::CustomAgents.claim_run(@managed_agent['key'], stamp)
+    return render json: { error: l(:error_agent_run_not_started) }, status: :conflict unless run
+
     RedmineAgent::Runner.run_async(@managed_agent, stamp)
-    render json: { run_id: run&.id }
+    render json: { run_id: run.id }
   end
 
   private
@@ -401,11 +403,15 @@ class RedmineAgentController < ApplicationController
   HOUR_INTERVALS = [1, 2, 3, 4, 6, 8, 12].freeze
 
   def build_agent_cron(params, current_cron = nil)
+    frequency = params[:frequency].to_s
+    return nil unless %w[hourly daily weekdays weekly monthly].include?(frequency)
+
     parts = current_cron.to_s.split
     tz = (parts.size >= 6 ? parts[5] : nil) || default_agent_timezone
 
     # Hourly carries an interval and a minute instead of a time of day.
     if params[:frequency].to_s == 'hourly'
+      return nil unless params[:every].to_s.match?(/\A\d{1,2}\z/) && params[:minute].to_s.match?(/\A\d{1,2}\z/)
       every = params[:every].to_i
       at    = params[:minute].to_i
       return nil unless HOUR_INTERVALS.include?(every) && (0..59).cover?(at)
@@ -414,6 +420,7 @@ class RedmineAgentController < ApplicationController
       return Fugit::Cron.parse(cron) ? cron : nil
     end
 
+    return nil unless params[:time].to_s.match?(/\A\d{2}:\d{2}\z/)
     hour, minute = params[:time].to_s.split(':').map { |n| n.to_i }
     return nil unless (0..23).cover?(hour) && (0..59).cover?(minute)
 
@@ -423,6 +430,8 @@ class RedmineAgentController < ApplicationController
           else '*'
           end
     dom = params[:frequency].to_s == 'monthly' ? params[:day].to_s.presence || '1' : '*'
+    return nil if frequency == 'weekly' && !dow.match?(/\A[0-6]\z/)
+    return nil if frequency == 'monthly' && !dom.match?(/\A(?:[1-9]|[12]\d|3[01]|L)\z/)
     cron = "#{minute} #{hour} #{dom} * #{dow} #{tz}"
 
     Fugit::Cron.parse(cron) ? cron : nil
@@ -626,6 +635,8 @@ class RedmineAgentController < ApplicationController
   EXTERNAL_READ_VERBS  = %w[get list read search find fetch view].freeze
   EXTERNAL_WRITE_VERBS = %w[send post create update delete add remove set write
                             reply invite upload complete schedule archive rename].freeze
+  # Destructive verbs, matched as a whole name segment on any server.
+  DELETE_VERBS = %w[delete remove destroy].freeze
   # Marker on a preview awaiting approval; the JS hangs Approve/Reject off it.
   # The model names the tool; #finalize_reply keeps it only if that tool exists.
   APPROVAL_MARKER = '[AWAITING_APPROVAL]'.freeze
@@ -670,6 +681,11 @@ class RedmineAgentController < ApplicationController
     return !!route[:write] if route
 
     WRITE_TOOL_PREFIXES.any? { |p| name.to_s.start_with?(p) }
+  end
+
+  # Destroys data, whatever the server. Name-based, like write_tool?.
+  def delete_tool?(name)
+    name.to_s.downcase.split(/[_-]/).any? { |seg| DELETE_VERBS.include?(seg) }
   end
 
   # Remembers that a data-changing tool was reached, so a failure later in the
@@ -1494,6 +1510,18 @@ class RedmineAgentController < ApplicationController
           Read-only tools (`get_*`, `list_*`) do not require approval.
 
         HITL
+      elsif runner_request?
+        <<~HITL
+
+          HUMAN-IN-THE-LOOP APPROVAL (UNATTENDED RUN)
+
+          Execute `create_*` and `update_*` tools immediately, with no preview.
+          Nobody can approve anything here, so never ask for approval and never
+          write [AWAITING_APPROVAL].
+          For `delete_*` tools, follow the ADDITIONAL INSTRUCTIONS below. If they
+          say nothing about deleting, refuse the delete and say why.
+
+        HITL
       else
         <<~HITL
 
@@ -1735,6 +1763,12 @@ class RedmineAgentController < ApplicationController
 
   # Validate and clean arguments before sending to MCP.
   def validate_tool_call(tool_name, arguments, routes = nil)
+    # An unattended run has nobody to approve a delete, so it never gets one.
+    if runner_request? && delete_tool?(tool_name)
+      logger.warn("Blocked delete tool #{tool_name} in unattended run")
+      return [nil, "#{tool_name} was NOT executed: deleting is not allowed in an unattended run."]
+    end
+
     return [arguments, nil] unless redmine_tool?(tool_name, routes)
 
     if sql_injected?(arguments)

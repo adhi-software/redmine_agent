@@ -19,6 +19,7 @@
 # task and schedule.
 class AiAgent < ActiveRecord::Base
   has_many :ai_agent_chats, dependent: :destroy
+  has_many :ai_agent_runs, dependent: :delete_all
 
   # case_sensitive: false compares with LOWER() on every adapter, so the name is
   # unique the same way on MySQL (case-insensitive collation) and on
