@@ -122,9 +122,16 @@ module RedmineAgent
       # A claim the scheduler could still re-derive is blanked instead of
       # deleted: deleting it hands the occurrence back to the next tick.
       def clear_runs(agent_key)
-        scope = AiAgentRun.for_agent(AiAgent.where(agent_key: agent_key).select(:id))
-        scope.where.not(id: live_claim_ids(scope)).delete_all
-        scope.update_all(status: CLEARED_STATUS, error: nil, reply_excerpt: nil)
+        agent = record_for(agent_key)
+        return unless agent
+
+        agent.with_lock do
+          scope = AiAgentRun.for_agent(agent.id)
+          scope.where.not(id: live_claim_ids(scope)).delete_all
+          scope.where.not(status: ['started', CLEARED_STATUS]).where(finished_at: nil)
+               .update_all(finished_at: Time.now)
+          scope.update_all(status: CLEARED_STATUS, error: nil, reply_excerpt: nil)
+        end
       end
 
       # Everything kept for this agent — prune_runs already caps the window.
@@ -133,13 +140,20 @@ module RedmineAgent
                   .where.not(status: CLEARED_STATUS).recent_first.limit(MAX_RUNS_PER_AGENT)
       end
 
-      # Claims this agent's slot for this minute. The unique index on stamp
-      # makes the claim atomic across processes, so two app workers can never
-      # both run the same schedule — the loser's INSERT is rejected. Returns
-      # nil when the slot is already taken.
+      # Serialize claims on the agent row, across app workers. The stamp index
+      # deduplicates an occurrence; this guard also excludes different manual
+      # or scheduled occurrences while the agent is already running.
       def claim_run(agent_key, stamp)
-        AiAgentRun.create!(ai_agent: record_for(agent_key), stamp: stamp,
-                         status: 'started', started_at: Time.now)
+        agent = record_for(agent_key)
+        return unless agent
+
+        agent.with_lock do
+          scope = AiAgentRun.for_agent(agent.id)
+          next if active_claims(scope).exists?
+
+          AiAgentRun.create!(ai_agent: agent, stamp: stamp,
+                             status: 'started', started_at: Time.now)
+        end
       rescue ActiveRecord::RecordNotUnique
         nil
       end
@@ -168,6 +182,10 @@ module RedmineAgent
         AiAgentRun.for_agent(AiAgent.where(agent_key: record['key']).select(:id))
                   .where(stamp: record['stamp']).where.not(status: CLEARED_STATUS)
                   .update_all(attrs.merge(updated_at: Time.now))
+        # A cleared run stays hidden, but completion must release its guard.
+        AiAgentRun.for_agent(AiAgent.where(agent_key: record['key']).select(:id))
+                  .where(stamp: record['stamp'], status: CLEARED_STATUS)
+                  .update_all(finished_at: attrs[:finished_at], updated_at: Time.now)
         prune_runs(record['key'])
         record
       rescue => e
@@ -205,6 +223,14 @@ module RedmineAgent
 
       private
 
+      # Cleared in-flight runs retain their lease. Expiry follows the existing
+      # interrupted-run policy and also works when no scheduler is ticking.
+      def active_claims(scope)
+        cutoff = Time.now - RedmineAgent::Scheduler::STALE_CLAIM_AFTER
+        scope.where(status: ['started', CLEARED_STATUS], finished_at: nil)
+             .where('started_at >= ?', cutoff)
+      end
+
       # Drops this agent's oldest runs — the log is a rolling window, not an
       # archive. A live claim is never dropped, however old the row is.
       def prune_runs(agent_key)
@@ -217,9 +243,10 @@ module RedmineAgent
       # manual run's stamp is unique per click and never comes back.
       def live_claim_ids(scope)
         cutoff = Time.now - RedmineAgent::Scheduler::TICK_GRACE
-        scope.where('started_at >= ?', cutoff).pluck(:id, :stamp)
+        occurrence_ids = scope.where('started_at >= ?', cutoff).pluck(:id, :stamp)
              .select { |_id, stamp| stamp.to_s.match?(RedmineAgent::Scheduler::OCCURRENCE_STAMP) }
              .map(&:first)
+        (occurrence_ids + active_claims(scope).pluck(:id)).uniq
       end
 
       def to_hash(record)

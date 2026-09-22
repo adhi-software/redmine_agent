@@ -102,7 +102,7 @@ en:
   label_agent_mcp_builtin_locked: The built-in server cannot be changed.
   error_agent_name_blank: Please enter a name.
   error_agent_task_blank: Please enter a task.
-  error_agent_run_not_started: "The task could not be started. Please use Run Now again."
+  error_agent_run_not_started: "The task is already running or could not be started. Wait for the current run to finish before using Run Now again."
   error_agent_name_taken: An agent with this name already exists.
   error_agent_invalid_schedule: Please enter a valid schedule time.
   error_agent_unknown: Unknown agent.
