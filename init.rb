@@ -58,6 +58,9 @@ Redmine::Plugin.register :redmine_agent do
                         "Reject all delete requests by default.",
     # When enabled, create/update/delete tool calls require manual user approval.
     'human_in_the_loop' => '1',
+    # Attachment limits used by both chat validation layers.
+    'attachment_max_count' => '5',
+    'attachment_max_total_size_mb' => '15',
     # Agents (name/task/schedule) live in the ai_agents table and their runs in
     # ai_agent_runs — see RedmineAgent::CustomAgents. Nothing agent-shaped is
     # stored here: the settings blob is a single read-modify-write row.

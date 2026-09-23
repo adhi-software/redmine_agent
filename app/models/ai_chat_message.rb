@@ -19,6 +19,24 @@
 # The owning user and agent are reached through the chat.
 class AiChatMessage < ActiveRecord::Base
   belongs_to :chat, class_name: 'AiAgentChat', foreign_key: :chat_id
+  has_many :attachments, as: :container, dependent: :destroy,
+                         inverse_of: :container
 
   validates :chat_id, presence: true
+
+  def attachments_visible?(user = User.current)
+    chat&.user_id == user.id
+  end
+
+  def attachments_editable?(user = User.current)
+    attachments_visible?(user)
+  end
+
+  def attachments_deletable?(user = User.current)
+    attachments_visible?(user)
+  end
+
+  def project
+    nil
+  end
 end

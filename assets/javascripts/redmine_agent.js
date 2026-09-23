@@ -4,6 +4,15 @@ document.addEventListener('DOMContentLoaded', function () {
 
   var form = document.getElementById('agent-chat-form');
   var input = document.getElementById('agent-chat-input');
+  var attachmentInput = document.getElementById('agent-chat-attachment');
+  var attachBtn = document.getElementById('agent-chat-attach');
+  var attachmentPreview = document.getElementById('agent-chat-attachment-preview');
+  var chatInputWrapper = document.querySelector('.chat-input-wrapper');
+  var pendingAttachments = [];
+  var attachmentPreviewUrls = [];
+  var attachmentError = '';
+  var MAX_ATTACHMENTS = parseInt(page.getAttribute('data-max-attachments'), 10);
+  var MAX_ATTACHMENTS_BYTES = parseInt(page.getAttribute('data-max-attachments-bytes'), 10);
   var sendBtn = document.getElementById('agent-chat-send');
   var messages = document.getElementById('agent-chat-messages');
   var chatArea = document.getElementById('agent-chat-area');
@@ -34,7 +43,12 @@ document.addEventListener('DOMContentLoaded', function () {
     unreachable: page.getAttribute('data-i18n-unreachable'),
     approvalApprove: page.getAttribute('data-i18n-approval-approve'),
     approvalReject: page.getAttribute('data-i18n-approval-reject'),
-    runFailed: page.getAttribute('data-i18n-run-failed')
+    runFailed: page.getAttribute('data-i18n-run-failed'),
+    attachFile: page.getAttribute('data-i18n-attach-file'),
+    removeFile: page.getAttribute('data-i18n-remove-file'),
+    close: page.getAttribute('data-i18n-close'),
+    attachmentsTooMany: page.getAttribute('data-i18n-attachments-too-many'),
+    attachmentsTooLarge: page.getAttribute('data-i18n-attachments-too-large')
   };
 
   var currentChatId = null;
@@ -79,7 +93,7 @@ document.addEventListener('DOMContentLoaded', function () {
     messages.innerHTML = '';
     entries.forEach(function (entry) {
       messages.appendChild(entry.chat ? buildChatBlock(entry.chat, entry.chat === last)
-                                      : buildRunErrorBlock(entry.run));
+        : buildRunErrorBlock(entry.run));
     });
 
     currentChatId = last ? last.chat_id : newChatId();
@@ -97,9 +111,9 @@ document.addEventListener('DOMContentLoaded', function () {
 
     var exchanges = chat.exchanges || [];
     exchanges.forEach(function (ex, index) {
-      appendMessage(ex.request, 'user', block);
+      appendMessage(ex.request, 'user', block, ex.attachments);
       renderAgentResponse({ type: 'html', html: ex.html, reply: ex.reply },
-                          isCurrent && index === exchanges.length - 1, block);
+        isCurrent && index === exchanges.length - 1, block);
     });
     return block;
   }
@@ -345,13 +359,81 @@ document.addEventListener('DOMContentLoaded', function () {
     if (w) w.remove();
   }
 
-  function appendMessage(text, sender, target) {
+  function appendMessage(text, sender, target, attachments) {
     clearWelcome();
     var el = document.createElement('div');
     el.className = 'redmine-agent-msg ' + sender;
     el.textContent = text;
+    if (sender === 'user') appendAttachmentImages(el, attachments);
     (target || messages).appendChild(el);
     messages.scrollTop = messages.scrollHeight;
+  }
+
+  function appendAttachmentImages(message, attachments) {
+    (attachments || []).forEach(function (attachment) {
+      var isLocalImage = attachment instanceof File && /^image\//.test(attachment.type);
+      if (!isLocalImage && !attachment.image) return;
+
+      var image = document.createElement('img');
+      image.className = 'agent-chat-message-image';
+      image.alt = attachment.filename || attachment.name || '';
+      if (isLocalImage) {
+        image.src = URL.createObjectURL(attachment);
+        image.addEventListener('load', function () { URL.revokeObjectURL(image.src); }, { once: true });
+      } else {
+        image.src = attachment.url;
+      }
+      image.tabIndex = 0;
+      image.setAttribute('role', 'button');
+      image.addEventListener('click', function () {
+        openImagePreview(isLocalImage ? URL.createObjectURL(attachment) : attachment.url,
+                         image.alt, isLocalImage);
+      });
+      image.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter' || event.key === ' ') image.click();
+      });
+      message.appendChild(image);
+    });
+  }
+
+  function openImagePreview(source, name, revokeOnClose) {
+    var viewer = document.createElement('div');
+    viewer.className = 'agent-image-viewer';
+    viewer.setAttribute('role', 'dialog');
+    viewer.setAttribute('aria-modal', 'true');
+    viewer.setAttribute('aria-label', name || i18n.attachFile);
+
+    var panel = document.createElement('div');
+    panel.className = 'agent-image-viewer-panel';
+    var image = document.createElement('img');
+    image.src = source;
+    image.alt = name || '';
+    var close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'agent-image-viewer-close';
+    close.setAttribute('aria-label', i18n.close);
+    close.textContent = '\u00d7';
+
+    function closeViewer() {
+      document.removeEventListener('keydown', closeOnEscape);
+      viewer.remove();
+      if (revokeOnClose) URL.revokeObjectURL(source);
+    }
+
+    function closeOnEscape(event) {
+      if (event.key === 'Escape') closeViewer();
+    }
+
+    close.addEventListener('click', closeViewer);
+    viewer.addEventListener('click', function (event) {
+      if (event.target === viewer) closeViewer();
+    });
+    document.addEventListener('keydown', closeOnEscape);
+    panel.appendChild(image);
+    panel.appendChild(close);
+    viewer.appendChild(panel);
+    document.body.appendChild(viewer);
+    close.focus();
   }
 
   // Marker the server adds when a write tool is paused for approval. Matched
@@ -463,7 +545,111 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   function updateSendButton() {
-    if (sendBtn && input) sendBtn.disabled = busy || input.value.trim() === '';
+    var hasAttachments = selectedAttachments().length > 0;
+    if (sendBtn && input) sendBtn.disabled = busy || (input.value.trim() === '' && !hasAttachments);
+    if (attachBtn) attachBtn.disabled = busy;
+  }
+
+  function selectedAttachments() {
+    return pendingAttachments;
+  }
+
+  function clearAttachment() {
+    pendingAttachments = [];
+    attachmentError = '';
+    if (attachmentInput) attachmentInput.value = '';
+    renderAttachmentPreview();
+    updateSendButton();
+  }
+
+  function releaseAttachmentPreviewUrls() {
+    attachmentPreviewUrls.forEach(function (url) { URL.revokeObjectURL(url); });
+    attachmentPreviewUrls = [];
+  }
+
+  document.addEventListener('click', function (event) {
+    if (!attachmentPreview) return;
+    Array.prototype.forEach.call(
+      attachmentPreview.querySelectorAll('.agent-chat-attachment-thumbnail.expanded'),
+      function (image) {
+        if (event.target === image) return;
+        image.classList.remove('expanded');
+        image.closest('.agent-chat-attachment-chip').classList.remove('image-expanded');
+      }
+    );
+  });
+
+  function renderAttachmentPreview() {
+    var files = selectedAttachments();
+    if (!attachmentPreview) return;
+    releaseAttachmentPreviewUrls();
+    attachmentPreview.innerHTML = '';
+    attachmentPreview.hidden = files.length === 0 && !attachmentError;
+    files.forEach(function (file) {
+      var chip = document.createElement('span');
+      chip.className = 'agent-chat-attachment-chip';
+      if (/^image\//.test(file.type) && window.URL && URL.createObjectURL) {
+        var thumbnail = document.createElement('img');
+        var thumbnailUrl = URL.createObjectURL(file);
+        attachmentPreviewUrls.push(thumbnailUrl);
+        thumbnail.className = 'agent-chat-attachment-thumbnail';
+        thumbnail.src = thumbnailUrl;
+        thumbnail.alt = file.name;
+        thumbnail.tabIndex = 0;
+        thumbnail.setAttribute('role', 'button');
+        thumbnail.addEventListener('click', function () {
+          var expanded = thumbnail.classList.toggle('expanded');
+          chip.classList.toggle('image-expanded', expanded);
+        });
+        thumbnail.addEventListener('keydown', function (event) {
+          if (event.key === 'Enter' || event.key === ' ') thumbnail.click();
+        });
+        chip.appendChild(thumbnail);
+      }
+      var name = document.createElement('span');
+      name.textContent = file.name;
+      var remove = document.createElement('button');
+      remove.type = 'button';
+      remove.title = i18n.removeFile;
+      remove.setAttribute('aria-label', i18n.removeFile);
+      remove.textContent = '\u00d7';
+      remove.addEventListener('click', function () {
+        pendingAttachments = pendingAttachments.filter(function (selected) { return selected !== file; });
+        attachmentError = attachmentValidationError(pendingAttachments);
+        renderAttachmentPreview();
+        updateSendButton();
+      });
+      chip.appendChild(name);
+      chip.appendChild(remove);
+      attachmentPreview.appendChild(chip);
+    });
+    if (attachmentError) {
+      var error = document.createElement('div');
+      error.className = 'agent-chat-attachment-error';
+      error.textContent = attachmentError;
+      attachmentPreview.appendChild(error);
+    }
+  }
+
+  function attachmentValidationError(files) {
+    if (files.length > MAX_ATTACHMENTS) return i18n.attachmentsTooMany;
+    var total = files.reduce(function (sum, file) { return sum + file.size; }, 0);
+    return total > MAX_ATTACHMENTS_BYTES ? i18n.attachmentsTooLarge : '';
+  }
+
+  function addAttachments(files) {
+    var candidate = pendingAttachments.slice();
+    Array.prototype.slice.call(files || []).forEach(function (file) {
+      var alreadySelected = candidate.some(function (selected) {
+        return selected.name === file.name && selected.size === file.size && selected.lastModified === file.lastModified;
+      });
+      if (!alreadySelected) candidate.push(file);
+    });
+
+    attachmentError = attachmentValidationError(candidate);
+    pendingAttachments = attachmentError ? pendingAttachments : candidate;
+    renderAttachmentPreview();
+    updateSendButton();
   }
 
   function setBusy(state) {
@@ -471,17 +657,27 @@ document.addEventListener('DOMContentLoaded', function () {
     updateSendButton();
   }
 
-  function sendMessage(text) {
+  function sendMessage(text, attachments) {
     if (!currentChatId) currentChatId = newChatId();
     setBusy(true);
     showLoading();
+    var body;
+    var headers = { 'X-CSRF-Token': csrfToken ? csrfToken.content : '' };
+    if (attachments && attachments.length) {
+      body = new FormData();
+      body.append('message', text);
+      body.append('chat_id', currentChatId);
+      attachments.forEach(function (attachment) {
+        body.append('attachments[]', attachment, attachment.name);
+      });
+    } else {
+      headers['Content-Type'] = 'application/json';
+      body = JSON.stringify({ message: text, chat_id: currentChatId });
+    }
     fetch(chatUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-CSRF-Token': csrfToken ? csrfToken.content : ''
-      },
-      body: JSON.stringify({ message: text, chat_id: currentChatId })
+      headers: headers,
+      body: body
     })
       .then(function (res) { return res.json(); })
       .then(function (data) {
@@ -522,16 +718,46 @@ document.addEventListener('DOMContentLoaded', function () {
       }
     });
 
+    if (attachBtn && attachmentInput) {
+      attachBtn.addEventListener('click', function () { if (!busy) attachmentInput.click(); });
+      attachmentInput.addEventListener('change', function () {
+        // Reset the picker so subsequent + selections can add more files.
+        var files = Array.prototype.slice.call(attachmentInput.files || []);
+        attachmentInput.value = '';
+        addAttachments(files);
+      });
+    }
+
+    if (chatInputWrapper) {
+      ['dragenter', 'dragover'].forEach(function (eventName) {
+        chatInputWrapper.addEventListener(eventName, function (event) {
+          if (!event.dataTransfer || !Array.prototype.includes.call(event.dataTransfer.types, 'Files')) return;
+          event.preventDefault();
+          if (!busy) chatInputWrapper.classList.add('agent-chat-drop-active');
+        });
+      });
+      chatInputWrapper.addEventListener('dragleave', function (event) {
+        if (!chatInputWrapper.contains(event.relatedTarget)) chatInputWrapper.classList.remove('agent-chat-drop-active');
+      });
+      chatInputWrapper.addEventListener('drop', function (event) {
+        event.preventDefault();
+        chatInputWrapper.classList.remove('agent-chat-drop-active');
+        if (!busy && event.dataTransfer) addAttachments(event.dataTransfer.files);
+      });
+    }
+
     form.addEventListener('submit', function (e) {
       e.preventDefault();
       if (busy) return;
       var text = input.value.trim();
-      if (!text) return;
-      appendMessage(text, 'user');
+      var attachments = selectedAttachments();
+      if (!text && !attachments.length) return;
+      appendMessage(text || ('Attached files: ' + attachments.map(function (file) { return file.name; }).join(', ')), 'user', null, attachments);
       input.value = '';
       updateSendButton();
       autoGrowInput();
-      sendMessage(text);
+      sendMessage(text, attachments);
+      clearAttachment();
     });
 
     updateSendButton();
@@ -543,7 +769,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
   var editAgentBtn = document.getElementById('agent-edit-agent');
   // A run is over in seconds normally; the cap covers the runner's own timeout.
-  var RUN_POLL_MS  = 2000;
+  var RUN_POLL_MS = 2000;
   var RUN_POLL_MAX = 155;
 
   var runAgentBtn = document.getElementById('agent-run-agent');
@@ -695,9 +921,9 @@ document.addEventListener('DOMContentLoaded', function () {
   // The header's actions, reachable on any of your agents without opening it.
   // The shared Chat agent is not one you manage, so its row gets none.
   var ROW_ACTIONS = [
-    { action: 'edit',   title: ai18n.editAgent },
-    { action: 'run',    title: ai18n.runNow },
-    { action: 'clear',  title: ai18n.clearLog,    cls: 'danger' },
+    { action: 'edit', title: ai18n.editAgent },
+    { action: 'run', title: ai18n.runNow },
+    { action: 'clear', title: ai18n.clearLog, cls: 'danger' },
     { action: 'delete', title: ai18n.deleteAgent, cls: 'danger' }
   ];
 
@@ -770,7 +996,7 @@ document.addEventListener('DOMContentLoaded', function () {
   function clearAgentLog(key) {
     if (!window.confirm(i18n.clearConfirm)) return;
     fetch(clearUrl.split('?')[0] + '?agent_key=' + encodeURIComponent(key),
-          { method: 'DELETE', headers: jsonHeaders(), body: JSON.stringify({ all: '1' }) })
+      { method: 'DELETE', headers: jsonHeaders(), body: JSON.stringify({ all: '1' }) })
       .then(function (res) { return res.json(); })
       .then(function () {
         if (key !== currentAgentKey) return;
@@ -809,8 +1035,10 @@ document.addEventListener('DOMContentLoaded', function () {
 
   function parseCronForForm(cron) {
     if (!cron) {
-      return { frequency: 'once', time: '09:00', weekday: '0', day: '1',
-               every: '4', minute: '0', timezone: defaultTimezone };
+      return {
+        frequency: 'once', time: '09:00', weekday: '0', day: '1',
+        every: '4', minute: '0', timezone: defaultTimezone
+      };
     }
     var parts = cron.trim().split(/\s+/);
     var min = parts[0], hour = parts[1], dom = parts[2], dow = parts[4], tz = parts[5] || defaultTimezone;
@@ -826,8 +1054,10 @@ document.addEventListener('DOMContentLoaded', function () {
     else if (dow === '1-5') { frequency = 'weekdays'; }
     else if (dow !== '*') { frequency = 'weekly'; weekday = dow; }
     else if (dom !== '*') { frequency = 'monthly'; day = dom; }
-    return { frequency: frequency, time: time, weekday: weekday, day: day,
-             every: every, minute: minute, timezone: tz };
+    return {
+      frequency: frequency, time: time, weekday: weekday, day: day,
+      every: every, minute: minute, timezone: tz
+    };
   }
 
   function ensureAgentModal() {

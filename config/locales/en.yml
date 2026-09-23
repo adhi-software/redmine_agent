@@ -48,6 +48,15 @@ en:
   label_agent_action_cancelled: "Cancelled — the action was not carried out. Let me know if you'd like to change anything and try again."
   label_agent_no_reply: "Sorry, I could not complete that request. Please try rephrasing it."
   label_agent_tool_unavailable: "I can't do that here — the %{action} action isn't available."
+  label_agent_attach_file: Attach file
+  label_agent_remove_file: Remove attached file
+  label_agent_attachment_settings: Attachments
+  label_agent_attachment_max_count: Maximum files per message
+  label_agent_attachment_max_total_size: Maximum total size (MB)
+  label_agent_attachment_max_count_hint: Maximum number of files allowed in one message.
+  label_agent_attachment_max_total_size_hint: Combined size allowed for all files in one message.
+  error_agent_attachments_too_many: You can attach up to %{count} files at once.
+  error_agent_attachments_too_large: The combined attachment size must be %{size} or smaller.
 
   # Custom agents
   label_agent_add_agent: Add agent

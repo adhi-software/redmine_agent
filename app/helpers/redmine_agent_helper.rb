@@ -24,10 +24,25 @@ module RedmineAgentHelper
   # The history panel's window; a page asks for the few it actually renders.
   MAX_CHATS = 500
 
+  def agent_attachment_max_count
+    agent_attachment_setting('attachment_max_count')
+  end
+
+  def agent_attachment_max_total_size
+    agent_attachment_setting('attachment_max_total_size_mb').megabytes
+  end
+
   # Group-held, with no admin bypass - the same gate erpmine_resident uses.
   def can_add_agent?
     Object.new.extend(WktimeHelper).validateERPPermission('ADD_AGT')
   end
+
+  def agent_attachment_setting(key)
+    defaults = Redmine::Plugin.find(:redmine_agent).settings[:default]
+    value = Setting.plugin_redmine_agent[key].presence || defaults[key]
+    value.to_i.positive? ? value.to_i : defaults[key].to_i
+  end
+  private :agent_attachment_setting
 
   def render_markdown(text)
     text = text.to_s
@@ -72,7 +87,7 @@ module RedmineAgentHelper
     chats = AiAgentChat.for_user(user)
                        .where(id: AiChatMessage.select(:chat_id))
                        .recent_first
-                       .includes(:ai_chat_messages)
+                       .includes(ai_chat_messages: :attachments)
                        .limit(limit)
     chats = chats.for_agent(ai_agent) if ai_agent
 
@@ -87,6 +102,7 @@ module RedmineAgentHelper
         exchanges:  rows.map { |d|
           cleaned = normalize_markdown(d.response)
           { request: d.request, reply: d.response.to_s,
+            attachments: present_chat_attachments(d.attachments),
             html: render_markdown(cleaned), markdown: cleaned }
         }
       }
@@ -121,6 +137,16 @@ module RedmineAgentHelper
   rescue => e
     Rails.logger.warn "Failed to save agent history: #{e.message}"
     nil
+  end
+
+  def present_chat_attachments(attachments)
+    Array(attachments).map do |attachment|
+      {
+        id: attachment.id, filename: attachment.filename,
+        content_type: attachment.content_type, image: attachment.image?,
+        url: (redmine_agent_attachment_path(attachment, attachment.filename) if attachment.image?)
+      }
+    end
   end
 
   # Every MCP server the chat can reach: the built-in Redmine one, plus the

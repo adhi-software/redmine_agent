@@ -100,6 +100,24 @@
   <%= link_to l(:button_delete), "javascript:removeSelectedMcp();",   class: 'button' %>
 </p>
 
+<fieldset class="box tabular settings">
+  <legend><%= l(:label_agent_attachment_settings) %></legend>
+  <p>
+    <label for="settings_attachment_max_count"><%= l(:label_agent_attachment_max_count) %></label>
+    <%= number_field_tag 'settings[attachment_max_count]',
+          agent_helper.agent_attachment_max_count, min: 1, step: 1,
+          id: 'settings_attachment_max_count' %>
+    <em class="info"><%= l(:label_agent_attachment_max_count_hint) %></em>
+  </p>
+  <p>
+    <label for="settings_attachment_max_total_size_mb"><%= l(:label_agent_attachment_max_total_size) %></label>
+    <%= number_field_tag 'settings[attachment_max_total_size_mb]',
+          agent_helper.agent_attachment_max_total_size / 1.megabyte, min: 1, step: 1,
+          id: 'settings_attachment_max_total_size_mb' %>
+    <em class="info"><%= l(:label_agent_attachment_max_total_size_hint) %></em>
+  </p>
+</fieldset>
+
 <p>
   <label><strong><%= l(:label_redmine_agent_mcp_status) %></strong></label>
   <% if is_mcp_install %>

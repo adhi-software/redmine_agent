@@ -4,6 +4,8 @@ post   'redmine_agent/chat',    to: 'redmine_agent#chat_request'
 post   'redmine_agent/test_model', to: 'redmine_agent#test_model'
 post   'redmine_agent/test_mcp_server', to: 'redmine_agent#test_mcp_server'
 get    'redmine_agent/history', to: 'redmine_agent#history'
+get    'redmine_agent/attachments/:id/:filename', to: 'redmine_agent#chat_attachment',
+       as: :redmine_agent_attachment, filename: /.*/
 delete 'redmine_agent/clear',   to: 'redmine_agent#clear'
 
 get    'redmine_agent/custom_agents',              to: 'redmine_agent#custom_agents'
@@ -12,5 +14,4 @@ patch  'redmine_agent/custom_agents/:key',         to: 'redmine_agent#update_age
 delete 'redmine_agent/custom_agents/:key',         to: 'redmine_agent#destroy_agent'
 post   'redmine_agent/custom_agents/:key/run',     to: 'redmine_agent#run_agent'
 get    'redmine_agent/custom_agents/:key/runs',    to: 'redmine_agent#agent_runs'
-
 

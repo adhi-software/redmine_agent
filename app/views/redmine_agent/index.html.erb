@@ -22,6 +22,8 @@
   scheduled     = @current_agent_key.present?
   welcome_title = scheduled ? l(:label_agent_runs_empty_title) : l(:label_redmine_agent_welcome_title)
   welcome_text  = scheduled ? l(:label_agent_runs_empty_text)  : l(:label_redmine_agent_welcome_text)
+  attachment_max_count = agent_helper.agent_attachment_max_count
+  attachment_max_total_size = agent_helper.agent_attachment_max_total_size
 %>
 
 <% if config_errors.any? %>
@@ -41,6 +43,13 @@
       data-i18n-delete-error="<%= l(:label_agent_delete_error) %>"
       data-i18n-clear-confirm="<%= l(:label_agent_clear_confirm) %>"
       data-i18n-unreachable="<%= l(:label_agent_unreachable) %>"
+      data-i18n-attach-file="<%= l(:label_agent_attach_file) %>"
+      data-i18n-remove-file="<%= l(:label_agent_remove_file) %>"
+      data-i18n-close="<%= l(:button_close) %>"
+      data-max-attachments="<%= attachment_max_count %>"
+      data-max-attachments-bytes="<%= attachment_max_total_size %>"
+      data-i18n-attachments-too-many="<%= l(:error_agent_attachments_too_many, count: attachment_max_count) %>"
+      data-i18n-attachments-too-large="<%= l(:error_agent_attachments_too_large, size: number_to_human_size(attachment_max_total_size)) %>"
       data-i18n-approval-approve="<%= l(:label_agent_approval_approve) %>"
       data-i18n-approval-reject="<%= l(:label_agent_approval_reject) %>"
       <%# With approval turned off nothing is ever gated, so the buttons stay
@@ -158,7 +167,13 @@
           beforeunload "Leave site?" warning. %>
       <% unless scheduled %>
         <form id="agent-chat-form">
+          <input id="agent-chat-attachment" type="file" hidden multiple
+                 accept="image/png,image/jpeg,image/gif,image/webp,text/plain,text/csv,text/markdown,text/x-markdown,text/html,text/xml,application/json,application/xml,application/yaml,text/yaml,text/x-yaml,.md,.markdown,.yml,.yaml,.log,.rb,.js,.ts,.css,.sql">
+          <div id="agent-chat-attachment-preview" hidden></div>
           <div class="chat-input-wrapper">
+            <button type="button" id="agent-chat-attach" class="agent-chat-attach" title="<%= l(:label_agent_attach_file) %>" aria-label="<%= l(:label_agent_attach_file) %>">
+              <svg viewBox="0 0 24 24" width="19" height="19" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>
+            </button>
             <textarea id="agent-chat-input" autocomplete="off" rows="1"
                       placeholder="<%= l(:label_redmine_agent_placeholder, default: 'Ask something...') %>"></textarea>
             <button type="submit" id="agent-chat-send" title="<%= l(:label_agent_send) %>">
