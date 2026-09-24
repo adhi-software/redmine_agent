@@ -81,6 +81,17 @@
   <%= l(:label_redmine_agent_hitl_hint) %>
 </p>
 
+<p>
+  <label for="settings_add_agent_group_id"><strong><%= l(:label_custom_agent_access) %></strong></label>
+  <%= select_tag 'settings[add_agent_group_id]',
+        options_for_select(
+          [[l(:label_none), '']] + agent_helper.agent_group_options,
+          settings['add_agent_group_id']
+        ),
+        id: 'settings_add_agent_group_id' %>
+  <em class="info"><%= l(:text_agent_creation_group_hint) %></em>
+</p>
+
 <div class="agent-config-row" style="display:flex; align-items:flex-start; padding:3px 0;">
   <label for="settings_mcp_servers" style="flex:0 0 295px; width:295px; margin:0 5px 0 0; float:none; text-align:end; font-weight:bold; line-height:24px;"><%= l(:label_agent_mcp_servers) %></label>
   <div style="flex:1 1 auto; min-width:0; display:flex; flex-wrap:wrap; gap:14px; align-items:flex-start;">

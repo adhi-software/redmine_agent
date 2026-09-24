@@ -10,8 +10,8 @@ delete 'redmine_agent/clear',   to: 'redmine_agent#clear'
 
 get    'redmine_agent/custom_agents',              to: 'redmine_agent#custom_agents'
 post   'redmine_agent/custom_agents',              to: 'redmine_agent#create_agent'
-patch  'redmine_agent/custom_agents/:key',         to: 'redmine_agent#update_agent'
-delete 'redmine_agent/custom_agents/:key',         to: 'redmine_agent#destroy_agent'
-post   'redmine_agent/custom_agents/:key/run',     to: 'redmine_agent#run_agent'
-get    'redmine_agent/custom_agents/:key/runs',    to: 'redmine_agent#agent_runs'
+patch  'redmine_agent/custom_agents/:agent_key',         to: 'redmine_agent#update_agent'
+delete 'redmine_agent/custom_agents/:agent_key',         to: 'redmine_agent#destroy_agent'
+post   'redmine_agent/custom_agents/:agent_key/run',     to: 'redmine_agent#run_agent'
+get    'redmine_agent/custom_agents/:agent_key/runs',    to: 'redmine_agent#agent_runs'
 

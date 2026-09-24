@@ -32,9 +32,12 @@ module RedmineAgentHelper
     agent_attachment_setting('attachment_max_total_size_mb').megabytes
   end
 
-  # Group-held, with no admin bypass - the same gate erpmine_resident uses.
+  # Group-held, with no admin bypass. The group is a single plugin setting
   def can_add_agent?
-    Object.new.extend(WktimeHelper).validateERPPermission('ADD_AGT')
+    group_id = Setting.plugin_redmine_agent['add_agent_group_id'].presence
+    return false unless group_id
+
+    User.current.groups.exists?(id: group_id)
   end
 
   def agent_attachment_setting(key)
@@ -185,5 +188,9 @@ module RedmineAgentHelper
     errors << I18n.t(:error_agent_no_model_config) unless agent_model_configured?
     errors << I18n.t(:error_agent_rest_api_disabled) if mcp_installed? && !Setting.rest_api_enabled?
     errors
+  end
+
+  def agent_group_options
+    Group.sorted.pluck(:lastname, :id)
   end
 end

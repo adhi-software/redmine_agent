@@ -1,9 +1,4 @@
 class CreateAiAgents < ActiveRecord::Migration[8.1]
-  # ERPmine group permission, shown on Settings > Group Permission.
-  PERMISSIONS = [
-    { name: 'ADD AGENT', short_name: 'ADD_AGT', modules: 'AI', plugin: 'ag' }
-  ].freeze
-
   def change
     # Agent list
     create_table :ai_agents do |t|
@@ -31,22 +26,5 @@ class CreateAiAgents < ActiveRecord::Migration[8.1]
       t.timestamps
     end
     add_index :ai_chat_messages, [:chat_id, :created_at]
-
-    reversible do |dir|
-      dir.up   { seed_permissions }
-      dir.down { WkPermission.where(short_name: PERMISSIONS.map { |p| p[:short_name] }).destroy_all }
-    end
-  end
-
-  private
-
-  def seed_permissions
-    PERMISSIONS.each do |perm|
-      next if WkPermission.exists?(short_name: perm[:short_name])
-
-      # wk_permissions rows carry explicit ids; the sequence is not in step.
-      perm = perm.merge(id: (WkPermission.unscoped.maximum(:id) || 0) + 1)
-      WkPermission.create!(perm) rescue puts "Failed: #{perm[:short_name]}"
-    end
   end
 end

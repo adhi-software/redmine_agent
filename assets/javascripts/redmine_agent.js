@@ -921,10 +921,8 @@ document.addEventListener('DOMContentLoaded', function () {
   // The header's actions, reachable on any of your agents without opening it.
   // The shared Chat agent is not one you manage, so its row gets none.
   var ROW_ACTIONS = [
-    { action: 'edit', title: ai18n.editAgent },
-    { action: 'run', title: ai18n.runNow },
-    { action: 'clear', title: ai18n.clearLog, cls: 'danger' },
-    { action: 'delete', title: ai18n.deleteAgent, cls: 'danger' }
+    { action: 'edit',   title: ai18n.editAgent },
+    { action: 'run',    title: ai18n.runNow }
   ];
 
   function agentKeyFromHref(href) {

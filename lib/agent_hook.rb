@@ -22,5 +22,6 @@ class AgentHook < Redmine::Hook::ViewListener
 		settings = context[:configs][:settings]
 		context[:configs][:agent_module] = true
 		settings['agent_human_in_the_loop'] = Setting.plugin_redmine_agent['human_in_the_loop'].to_s == '1'
+		settings['agent_can_add'] = can_add_agent?
 	end
 end

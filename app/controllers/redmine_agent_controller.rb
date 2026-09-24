@@ -34,7 +34,9 @@ class RedmineAgentController < ApplicationController
   before_action :set_managed_agent, only: [:update_agent, :destroy_agent, :run_agent, :agent_runs]
   before_action :sync_agent_menu
 
-  accept_api_auth :index, :agents, :chat_request, :history, :clear, :chat_attachment
+  accept_api_auth :index, :agents, :chat_request, :history, :clear, :chat_attachment,
+                   :custom_agents, :create_agent, :update_agent, :destroy_agent,
+                   :run_agent, :agent_runs
 
   menu_item :ai_agent_query
 
@@ -184,7 +186,16 @@ class RedmineAgentController < ApplicationController
 
     response = http.request(req)
     unless response.is_a?(Net::HTTPSuccess)
-      raise "HTTP #{response.code} #{response.message}"
+      # The provider's own error body (e.g. invalid API key, low credit
+      # balance, model access) is far more useful than the bare HTTP status.
+      detail = begin
+        parsed = JSON.parse(response.body.to_s)
+        err = parsed['error']
+        err.is_a?(Hash) ? err['message'] : err.to_s
+      rescue JSON::ParserError, TypeError
+        nil
+      end
+      raise (detail.presence || "HTTP #{response.code} #{response.message}")
     end
 
     # No message on success — the Connected indicator is the whole result.
@@ -420,7 +431,7 @@ class RedmineAgentController < ApplicationController
   # The agent a management action targets. Managing one is the creator's alone
   # — the default agent, which has no creator, is nobody's to manage.
   def set_managed_agent
-    @managed_agent = RedmineAgent::CustomAgents.find(params[:key].to_s)
+    @managed_agent = RedmineAgent::CustomAgents.find(params[:agent_key].to_s)
     return render json: { error: l(:error_agent_unknown) }, status: :unprocessable_entity unless @managed_agent
     return if @managed_agent['created_by'] == User.current.id
 

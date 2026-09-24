@@ -42,6 +42,8 @@ en:
   error_agent_rest_api_disabled: "The REST web service is disabled. Please enable it in Administration → Settings → Integrations."
   label_redmine_agent_hitl: "Human in the loop for  Create / Update actions"
   label_redmine_agent_hitl_hint: "Note: When enabled, Requires approval for DB operations."
+  label_agent_add_agent_group: "Add Agent — Group"
+  label_agent_add_agent_group_hint: "Members of this group may create custom agents. Leave blank to disable for everyone."
   label_agent_approval_approve: Approve
   label_agent_approval_reject: Reject
   label_agent_approval_prompt: "Please review this action and approve or reject it."
@@ -121,3 +123,37 @@ en:
   # Group permission tab: the fieldset legend, then the permission's own name as its key.
   label_ai: AI
   ADD AGENT: Add Agent
+
+  label_redmine_agent_greeting: Hi! How can I help you today?
+  label_agent: Agent
+  label_agent_no_chats: No conversations yet
+  label_agent_chat: Chat
+  label_agent_header_title: Agents
+  label_agent_no_agents: No agents found
+  label_agent_search: Search agents
+  label_agent_schedule_none: Not scheduled
+  label_agent_scheduled: Scheduled
+  label_agent_every_n_hours: "Every %{count} hours"
+  label_agent_every_n_hours_at: "Every %{count} hours at :%{minute}"
+  label_agent_hourly_at: "Hourly at :%{minute}"
+  label_agent_weekdays_at: "Weekdays at %{time}"
+  label_agent_monthly_on_day: "Monthly on day %{day} at %{time}"
+  label_agent_weekly_at: "Every %{weekday} at %{time}"
+  label_agent_daily_at: "Daily at %{time}"
+  label_agent_sunday: Sunday
+  label_agent_monday: Monday
+  label_agent_tuesday: Tuesday
+  label_agent_wednesday: Wednesday
+  label_agent_thursday: Thursday
+  label_agent_friday: Friday
+  label_agent_saturday: Saturday
+  label_agent_cannot_run: This agent cannot be run manually
+  label_agent_cannot_delete: This agent cannot be deleted
+  label_agent_history_cleared: History cleared
+  label_agent_saved: "Agent \"%{name}\" saved"
+  label_agent_started: "\"%{name}\" started"
+  label_agent_deleted: "\"%{name}\" deleted"
+  label_agent_copied: Copied
+  
+  label_custom_agent_access: Custom Agent Access
+  text_agent_creation_group_hint: "Only members of this group can create and manage custom agents."
