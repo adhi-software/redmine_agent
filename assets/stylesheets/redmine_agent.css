@@ -161,6 +161,56 @@ html:has(.agent-config-error) #main.sidebar {
   border-color: #3b7ddd;
 }
 
+.agent-run-label {
+  display: none;
+}
+
+/* Run Now is asynchronous. Replace its play icon with a spinner and expose a
+   persistent label while the browser waits for the completed run. */
+#agent-run-agent.agent-run-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  opacity: 1;
+  color: #3b7ddd;
+  background: #eaf1fc;
+  border-color: #3b7ddd;
+}
+
+#agent-run-agent.agent-run-pending svg {
+  display: none;
+}
+
+#agent-run-agent.agent-run-pending::before,
+.agent-row-actions .act-run.agent-run-pending::before {
+  content: "";
+  width: 14px;
+  height: 14px;
+  box-sizing: border-box;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  background: none;
+  -webkit-mask-image: none;
+  mask-image: none;
+  animation: agent-run-spin 0.75s linear infinite;
+}
+
+#agent-run-agent.agent-run-pending .agent-run-label {
+  display: inline;
+}
+
+@keyframes agent-run-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #agent-run-agent.agent-run-pending::before,
+  .agent-row-actions .act-run.agent-run-pending::before {
+    animation-duration: 1.5s;
+  }
+}
+
 .chat-header-actions button.danger {
   color: #e74c3c;
 }
@@ -960,6 +1010,17 @@ html:has(.agent-config-error) #main.sidebar {
    AGENTS: sidebar "+" button, management panel, create/edit modal
    ═════════════════════════════════════════════════════════════════════════════ */
 
+/* The theme positions the nav 57px below the viewport but gives it height:100%,
+   leaving its last 57px outside the screen. Once the agent list is tall enough
+   (11 rows on the usual test viewport), that hides the Add agent action even
+   at the bottom of the scroll range. Size this page's nav to the space that is
+   actually visible so every agent count keeps the action reachable. */
+.controller-redmine_agent.action-index #left-nav {
+  height: calc(100vh - 57px);
+  box-sizing: border-box;
+  overflow-y: auto;
+}
+
 #agent-menu-actions {
   padding: 4px 0 4px 20px;
 }
@@ -1005,7 +1066,8 @@ html:has(.agent-config-error) #main.sidebar {
 }
 
 #main-menu li.agent-row:hover .agent-row-actions,
-#main-menu li.agent-row.highlighted .agent-row-actions {
+#main-menu li.agent-row.highlighted .agent-row-actions,
+#main-menu li.agent-row.agent-run-active .agent-row-actions {
   display: flex;
 }
 

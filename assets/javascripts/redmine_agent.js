@@ -842,11 +842,34 @@ document.addEventListener('DOMContentLoaded', function () {
     editAgentBtn.addEventListener('click', function () { withAgent(currentAgentKey, openAgentForm); });
   }
 
+  function setRunButtonBusy(btn, isBusy) {
+    if (!btn) return;
+    btn.disabled = isBusy;
+    btn.title = isBusy ? ai18n.running : ai18n.runNow;
+    btn.setAttribute('aria-label', isBusy ? ai18n.running : ai18n.runNow);
+    btn.setAttribute('aria-busy', isBusy ? 'true' : 'false');
+    btn.classList.toggle('agent-run-pending', isBusy);
+
+    // A nav-row action is normally visible only on hover. Keep its spinner in
+    // view after the pointer leaves so the running state cannot disappear.
+    var row = btn.closest && btn.closest('li.agent-row');
+    if (row) row.classList.toggle('agent-run-active', isBusy);
+  }
+
+  function setAgentRunBusy(key, isBusy) {
+    // The selected agent has a Run Now action in both the page header and its
+    // left-nav row. Keep every representation locked to the same run state.
+    if (key === currentAgentKey) setRunButtonBusy(runAgentBtn, isBusy);
+    Array.prototype.forEach.call(document.querySelectorAll('.agent-row-actions'), function (box) {
+      if (box.getAttribute('data-agent-key') !== key) return;
+      setRunButtonBusy(box.querySelector('[data-agent-action="run"]'), isBusy);
+    });
+  }
+
   // Every agent can be run on demand - a schedule is not what makes it runnable.
   if (runAgentBtn) {
     runAgentBtn.addEventListener('click', function () {
-      runAgentBtn.disabled = true;
-      runAgentBtn.title = ai18n.running;
+      setAgentRunBusy(currentAgentKey, true);
       fetch(customAgentsUrl + '/' + currentAgentKey + '/run', { method: 'POST', headers: jsonHeaders() })
         .then(function (res) { return res.json(); })
         .then(function (data) {
@@ -854,8 +877,7 @@ document.addEventListener('DOMContentLoaded', function () {
           pollRun(currentAgentKey, data.run_id, 0, function () { window.location.reload(); });
         })
         .catch(function () {
-          runAgentBtn.disabled = false;
-          runAgentBtn.title = ai18n.runNow;
+          setAgentRunBusy(currentAgentKey, false);
         });
     });
   }
@@ -972,8 +994,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
   function runAgentRow(btn, key) {
     if (btn.disabled) return;
-    btn.disabled = true;
-    btn.title = ai18n.running;
+    setAgentRunBusy(key, true);
     fetch(customAgentsUrl + '/' + key + '/run', { method: 'POST', headers: jsonHeaders() })
       .then(function (res) { return res.json(); })
       .then(function (data) {
@@ -981,13 +1002,11 @@ document.addEventListener('DOMContentLoaded', function () {
         pollRun(key, data.run_id, 0, function () {
           // Only the open agent's page shows what the run wrote.
           if (key === currentAgentKey) { window.location.reload(); return; }
-          btn.disabled = false;
-          btn.title = ai18n.runNow;
+          setAgentRunBusy(key, false);
         });
       })
       .catch(function () {
-        btn.disabled = false;
-        btn.title = ai18n.runNow;
+        setAgentRunBusy(key, false);
       });
   }
 
@@ -1066,7 +1085,6 @@ document.addEventListener('DOMContentLoaded', function () {
     modal.className = 'agent-modal-backdrop';
     modal.hidden = true;
     document.body.appendChild(modal);
-    modal.addEventListener('click', function (e) { if (e.target === modal) closeAgentForm(); });
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape' && !modal.hidden) closeAgentForm();
     });

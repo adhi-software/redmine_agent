@@ -120,6 +120,7 @@
             </button>
             <button id="agent-run-agent" class="primary" type="button" title="<%= l(:label_agent_run_now) %>">
               <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              <span class="agent-run-label"><%= l(:label_agent_running) %></span>
             </button>
             <%# An eraser, not a bin: this wipes the log, the button below deletes the agent. %>
             <button id="agent-clear-chat" class="danger" type="button" title="<%= l(:label_agent_clear_chat) %>" disabled>

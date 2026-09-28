@@ -42,8 +42,8 @@ Redmine::Plugin.register :redmine_agent do
   name 'Redmine Agent'
   author 'Adhi Software Pvt Ltd'
   description 'Redmine Agent'
-  version '1.0.1'
-  url ''
+  version '1.0.2'
+  url 'https://www.redmine.org/plugins/redmine_agent'
   author_url 'http://www.adhisoftware.co.in/'
   requires_redmine version_or_higher: '6.0.0'
 
