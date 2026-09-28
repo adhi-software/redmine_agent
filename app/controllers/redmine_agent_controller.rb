@@ -141,7 +141,7 @@ class RedmineAgentController < ApplicationController
 
     # Dispatch on the configured type/host only — never on the model name, since
     # OpenRouter serves anthropic/claude-* models over the OpenAI-compatible API.
-    is_claude    = (name == 'claude' || server_url.include?('anthropic.com'))
+    is_claude    = server_url.downcase.include?('anthropic.com')
     is_responses = !is_claude && responses_url?(server_url)
 
     # Claude's URL is used as entered; the others are normalised as in the chat
@@ -176,12 +176,12 @@ class RedmineAgentController < ApplicationController
       }.compact.to_json
     else
       req['Authorization'] = "Bearer #{api_key}" if api_key.present?
+      token_limit = gpt5_model?(model) ? { max_completion_tokens: 1 } : { max_tokens: 1 }
       req.body = {
         model:      model.presence,
         messages:   [{ role: 'user', content: 'ping' }],
-        max_tokens: 1,
         stream:     false
-      }.compact.to_json
+      }.merge(token_limit).compact.to_json
     end
 
     response = http.request(req)
@@ -203,6 +203,13 @@ class RedmineAgentController < ApplicationController
   rescue => e
     Rails.logger.warn "Model test failed: #{e.class}: #{e.message}"
     render json: { success: false, message: e.message.presence || l(:label_redmine_agent_test_fail) }
+  end
+
+  # GPT-5 Chat Completions models accept max_completion_tokens rather than
+  # the legacy max_tokens parameter. Other OpenAI-compatible servers retain
+  # the older parameter for broad compatibility.
+  def gpt5_model?(model)
+    model.to_s.strip.downcase.start_with?('gpt-5')
   end
 
   # Test an MCP server row from the settings popup: handshake, then list tools.
