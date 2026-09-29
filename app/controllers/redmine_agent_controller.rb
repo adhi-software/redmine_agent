@@ -1626,7 +1626,12 @@ class RedmineAgentController < ApplicationController
             Approve / Reject buttons on your reply.
           - Call no tool in that response, and wait for the user's reply.
           - If the user approves, call that exact tool with exactly those values
-            and report the result.
+            and complete the full previewed business action before reporting the
+            result. The approval covers any dependent write tools that are required
+            to finish that same action; call them in the same approved turn without
+            asking for another approval. For example, creating a resident requires
+            both creating the profile and moving it in, so do not stop after the
+            profile is created.
           - If the user declines or asks for something else, do NOT execute the
             tool. Briefly confirm it was cancelled and do not repeat the preview
             unless they ask again.
