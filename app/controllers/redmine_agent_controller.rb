@@ -696,6 +696,25 @@ class RedmineAgentController < ApplicationController
     route = routes.is_a?(Hash) ? routes[tool_name.to_s] : nil
     return { error: "Unknown tool #{tool_name}" } unless route
 
+    result = call_mcp_route(route, arguments)
+    return result unless tool_result_error?(result) && !route[:write]
+
+    # A scheduled run can reach a stateful MCP server after its session has
+    # expired or been discarded. Reads are safe to repeat, so reconnect once
+    # instead of stopping the whole agent before a later notification tool can
+    # run. Writes (including Slack sends) are deliberately never retried: an
+    # error response does not prove that the remote side did not perform them.
+    logger.warn "MCP read #{tool_name} failed; reconnecting once"
+    session_id, _instructions, version = mcp_handshake(route)
+    route[:session_id] = session_id
+    route[:protocol_version] = version
+    call_mcp_route(route, arguments)
+  rescue => e
+    Rails.logger.warn "MCP tools/call failed: #{e.message}"
+    { error: e.message }
+  end
+
+  def call_mcp_route(route, arguments)
     uri  = URI.parse(route[:url])
     http = build_http(uri, read_timeout: 30)
 
@@ -710,9 +729,6 @@ class RedmineAgentController < ApplicationController
 
     parsed = mcp_body(call_response)
     parsed['error'] ? { error: parsed['error'] } : (parsed['result'] || { success: true })
-  rescue => e
-    Rails.logger.warn "MCP tools/call failed: #{e.message}"
-    { error: e.message }
   end
 
   # Used to stop the tool loop on the first error.
