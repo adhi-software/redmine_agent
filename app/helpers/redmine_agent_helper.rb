@@ -32,12 +32,11 @@ module RedmineAgentHelper
     agent_attachment_setting('attachment_max_total_size_mb').megabytes
   end
 
-  # Group-held, with no admin bypass. The group is a single plugin setting
   def can_add_agent?
-    group_id = Setting.plugin_redmine_agent['add_agent_group_id'].presence
-    return false unless group_id
+    group_ids = Array(Setting.plugin_redmine_agent['add_agent_group_id']).map(&:to_s).reject(&:blank?)
+    return false if group_ids.empty?
 
-    User.current.groups.exists?(id: group_id)
+    User.current.groups.where(id: group_ids).exists?
   end
 
   def agent_attachment_setting(key)

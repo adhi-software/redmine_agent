@@ -83,12 +83,14 @@
 
 <p>
   <label for="settings_add_agent_group_id"><strong><%= l(:label_custom_agent_access) %></strong></label>
-  <%= select_tag 'settings[add_agent_group_id]',
-        options_for_select(
-          [[l(:label_none), '']] + agent_helper.agent_group_options,
-          settings['add_agent_group_id']
-        ),
-        id: 'settings_add_agent_group_id' %>
+  <% selected_group_ids = Array(settings['add_agent_group_id']).map(&:to_s).reject(&:blank?) %>
+  <%# Posted even when nothing is selected, so clearing every group sticks. %>
+  <%= hidden_field_tag 'settings[add_agent_group_id][]', '', id: nil %>
+  <%= select_tag 'settings[add_agent_group_id][]',
+        options_for_select(agent_helper.agent_group_options, selected_group_ids),
+        id: 'settings_add_agent_group_id',
+        multiple: true, size: 6,
+        style: 'min-width:220px; vertical-align:top;' %>
   <em class="info"><%= l(:text_agent_creation_group_hint) %></em>
 </p>
 
