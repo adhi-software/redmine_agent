@@ -68,8 +68,8 @@
   <%# The plugin default seeds this on install only; once saved, a cleared box stays blank. %>
   <%= text_area_tag 'settings[instructions]', settings['instructions'],
         id: 'settings_instructions', rows: 8,
-        style: 'width:520px; max-width:100%; box-sizing:border-box;' %></br>
-  <%= l(:label_redmine_agent_instructions_hint) %>
+        style: 'width:520px; max-width:100%; box-sizing:border-box;' %><br>
+  <span class="agent-config-note"><%= l(:label_redmine_agent_instructions_hint) %></span>
 </p>
 
 <p>
@@ -78,7 +78,7 @@
   <%= check_box_tag 'settings[human_in_the_loop]', '1',
         settings['human_in_the_loop'].to_s == '1',
         id: 'settings_human_in_the_loop' %>
-  <%= l(:label_redmine_agent_hitl_hint) %>
+  <span class="agent-config-note"><%= l(:label_redmine_agent_hitl_hint) %></span>
 </p>
 
 <p>
@@ -104,7 +104,7 @@
           multiple: true, size: 6, id: 'settings_mcp_servers',
           class: 'multi-row', style: 'display:none;' %>
     <ul id="settings_mcp_servers_view" class="agents-sortable"></ul>
-    <span class="mcp-hint"><%= l(:label_agent_mcp_servers_hint) %></span>
+    <span class="agent-config-note mcp-hint"><%= l(:label_agent_mcp_servers_hint) %></span>
   </div>
 </div>
 <p>
@@ -194,6 +194,16 @@
 
   .mcp-builtin-note { color: #555; font-size: 0.9em; line-height: 1.4; }
 
+  /* Keep configuration help notes consistent with the note in the LLM dialog. */
+  .agent-config-note {
+    color: inherit;
+    font-family: inherit;
+    font-size: 1em;
+    font-style: normal;
+    font-weight: normal;
+    line-height: normal;
+  }
+
   /* Sits beside the list; wraps under it when the form is narrow. */
   .mcp-hint { flex: 1 1 240px; max-width: 360px; line-height: 1.5; }
 
@@ -218,7 +228,7 @@
       <th align="left" style="width:90px; white-space:nowrap; vertical-align:top;"><label><%= l(:label_redmine_agent_model) %></label></th>
       <td>
         <%= text_field_tag 'agent_model', '', id: 'agent_model', style: 'width:100%; box-sizing:border-box;' %>
-        <%= simple_format(l(:label_redmine_agent_model_hint)) %>
+        <%= simple_format(l(:label_redmine_agent_model_hint), class: 'agent-config-note') %>
       </td>
     </tr>
     <tr>

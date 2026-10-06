@@ -35,12 +35,12 @@ en:
   label_redmine_agent_model_hint: "Note: For multiple models, use commas.\nFor eg. claude-sonnet-5, claude-opus-5, qwen/qwen3.6-27b, gemini-3.6-flash"
   label_redmine_agent_duplicate: An agent with this name already exists.
   label_redmine_agent_select_row: Please select an LLM from the list.
-  label_redmine_agent_mcp_status: MCP Plugin
+  label_redmine_agent_mcp_status: Redmine MCP Plugin
   label_installed: Installed
   label_not_installed: Not Installed
   error_agent_no_model_config: "No model is configured. Please add a model in the plugin settings."
   error_agent_rest_api_disabled: "The REST web service is disabled. Please enable it in Administration → Settings → Integrations."
-  label_redmine_agent_hitl: "Human in the loop for  Create / Update actions"
+  label_redmine_agent_hitl: "Human in the loop"
   label_redmine_agent_hitl_hint: "Note: When enabled, Requires approval for DB operations."
   label_agent_add_agent_group: "Add Agent — Group"
   label_agent_add_agent_group_hint: "Members of any of these groups may create custom agents."
