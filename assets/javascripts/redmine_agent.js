@@ -803,7 +803,6 @@ document.addEventListener('DOMContentLoaded', function () {
     timeLabel: page.getAttribute('data-i18n-schedule-time'),
     weekdayLabel: page.getAttribute('data-i18n-schedule-weekday'),
     dayLabel: page.getAttribute('data-i18n-schedule-day'),
-    lastDay: page.getAttribute('data-i18n-schedule-last-day'),
     dayWarning: page.getAttribute('data-i18n-schedule-day-warning'),
     save: page.getAttribute('data-i18n-save'),
     saving: page.getAttribute('data-i18n-saving'),
@@ -1262,11 +1261,7 @@ document.addEventListener('DOMContentLoaded', function () {
     var daySelect = document.createElement('select');
     daySelect.className = 'multi-row';
     var dayOptions = [];
-    for (var dnum = 1; dnum <= 28; dnum++) dayOptions.push([String(dnum), String(dnum)]);
-    // An agent saved on 29-31 predates this list; keep its value as an option so
-    // opening the form doesn't silently move its schedule to the 1st.
-    if (/^(29|30|31)$/.test(String(sched.day))) dayOptions.push([String(sched.day), String(sched.day)]);
-    dayOptions.push(['L', ai18n.lastDay]);
+    for (var dnum = 1; dnum <= 31; dnum++) dayOptions.push([String(dnum), String(dnum)]);
 
     dayOptions.forEach(function (pair) {
       var opt = document.createElement('option');
