@@ -153,6 +153,9 @@ en:
   label_agent_started: "%{name} started"
   label_agent_deleted: "%{name} deleted"
   label_agent_copied: Copied
+  label_agent_schedule_date: Date
+  error_agent_date_past: The chosen date has already passed
+  error_agent_datetime_past: Pick a time in the future
   
   label_custom_agent_access: Custom Agent Access
   text_agent_creation_group_hint: "Only members of this group can create and manage custom agents."
