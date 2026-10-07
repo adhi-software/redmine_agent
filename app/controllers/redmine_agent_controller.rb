@@ -741,7 +741,7 @@ class RedmineAgentController < ApplicationController
   # Tool names that only read data — never recorded as a completed action.
   READ_TOOL_PREFIXES = %w[get_ list_].freeze
   # Data-changing tools, gated behind user approval when HITL is on.
-  WRITE_TOOL_PREFIXES = %w[create_ update_ delete_ send_ post_].freeze
+  WRITE_TOOL_PREFIXES = %w[create_ update_ delete_ move_in_ move_out_ transfer_ send_ post_].freeze
   # A configured server (Slack, Teams, ...) acts on an outside system, so
   # anything there that is not plainly a read is gated — an unrecognised tool
   # asks for approval rather than firing silently.
@@ -761,7 +761,9 @@ class RedmineAgentController < ApplicationController
   APPROVAL_VERBS = {
     'create' => %w[create creating add adding log logging new],
     'update' => %w[update updating change changing edit editing modify modifying set],
-    'delete' => %w[delete deleting remove removing]
+    'delete' => %w[delete deleting remove removing],
+    'move' => %w[move moving],
+    'transfer' => %w[transfer transferring]
   }.freeze
   # Sent back instead of running a gated write, so the model previews it.
   HITL_NOTE = 'NOT EXECUTED — user approval required. Describe this action and its ' \
@@ -1619,7 +1621,8 @@ class RedmineAgentController < ApplicationController
 
           HUMAN-IN-THE-LOOP APPROVAL (ENABLED)
 
-          Before using any `create_*`, `update_*`, or `delete_*` tool:
+          Before using any `create_*`, `update_*`, `delete_*`, `move_in_*`,
+          `move_out_*`, or `transfer_*` tool:
           - Show a preview of the action and the field values.
           - End the response with `[AWAITING_APPROVAL:<tool_name>]`, naming the
             exact tool you will call once approved. The name is what puts the
@@ -1645,7 +1648,8 @@ class RedmineAgentController < ApplicationController
 
           HUMAN-IN-THE-LOOP APPROVAL (UNATTENDED RUN)
 
-          Execute `create_*` and `update_*` tools immediately, with no preview.
+          Execute `create_*`, `update_*`, `move_in_*`, `move_out_*`, and
+          `transfer_*` tools immediately, with no preview.
           Nobody can approve anything here, so never ask for approval and never
           write [AWAITING_APPROVAL].
           For `delete_*` tools, follow the ADDITIONAL INSTRUCTIONS below. If they
@@ -1657,7 +1661,8 @@ class RedmineAgentController < ApplicationController
 
           HUMAN-IN-THE-LOOP APPROVAL (DISABLED)
 
-          Execute `create_*`, `update_*`, and `delete_*` tools immediately.
+          Execute `create_*`, `update_*`, `delete_*`, `move_in_*`, `move_out_*`,
+          and `transfer_*` tools immediately.
           Do not show a preview or ask for approval.
 
         HITL
