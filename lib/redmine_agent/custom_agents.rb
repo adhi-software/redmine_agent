@@ -17,6 +17,7 @@ module RedmineAgent
     # ":ai_agent_#{key}" must equal the menu item name already class-level
     # registered as the controller's default (menu_item :ai_agent_query).
     QUERY_AGENT_KEY = 'query'.freeze
+    QUERY_AGENT_DISPLAY_NAME = 'Chat'.freeze
 
     # Runs kept per agent.
     MAX_RUNS_PER_AGENT = 50
@@ -67,6 +68,11 @@ module RedmineAgent
       # Mirrors the unique name column: excluded by id, so the check does not
       # depend on how the database compares a NULL agent_key.
       def name_taken?(name, except_key: nil)
+        if name.to_s.strip.casecmp?(QUERY_AGENT_DISPLAY_NAME) &&
+           except_key.to_s != QUERY_AGENT_KEY
+          return true
+        end
+
         scope = AiAgent.named(name)
         current = except_key.present? ? record_for(except_key) : nil
         scope = scope.where.not(id: current.id) if current
@@ -198,7 +204,9 @@ module RedmineAgent
       # this runs on every relevant request so every app worker stays in
       # sync without a restart).
       def sync_menu!
-        desired = AiAgent.agents.order(:id).pluck(:agent_key, :name, :created_by_id)
+        desired = AiAgent.agents.order(:id).pluck(:agent_key, :name, :created_by_id).map do |key, name, created_by|
+          [key, display_name(key, name), created_by]
+        end
         return if desired == @menu_signature
 
         SYNC_MUTEX.synchronize do
@@ -252,7 +260,7 @@ module RedmineAgent
       def to_hash(record)
         {
           'key'         => record.agent_key,
-          'name'        => record.name,
+          'name'        => display_name(record.agent_key, record.name),
           'task'        => record.task.to_s,
           'cron'        => record.cron.presence,
           'created_by'  => record.created_by_id,
@@ -262,6 +270,10 @@ module RedmineAgent
           'schedule_changed_at' => record.schedule_changed_at,
           'ai_agent_id' => record.id
         }
+      end
+
+      def display_name(key, stored_name)
+        key.to_s == QUERY_AGENT_KEY ? QUERY_AGENT_DISPLAY_NAME : stored_name
       end
 
       # Only the keys actually given are mapped, so a partial update never

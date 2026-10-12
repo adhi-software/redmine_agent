@@ -1,15 +1,11 @@
 class AddScheduledAgents < ActiveRecord::Migration[8.1]
   AGENT_KEY = 'query'.freeze
-  AGENT_NAME = 'Chat'.freeze
-  # The name the v1.0.1 app gave the same row, before agents had keys.
-  OLD_AGENT_NAME = 'Query Agent'.freeze
+  AGENT_NAME = 'Query Agent'.freeze
+  AGENT_DESCRIPTION = 'Default Redmine chat agent'.freeze
 
   def up
     create_table :ai_agent_runs do |t|
       t.references :ai_agent, null: false, foreign_key: true
-      # Unique so two app processes can never both claim the same minute for
-      # the same agent — the DB rejects the second INSERT. Never NULL: a
-      # SQL Server unique index allows only one of those.
       t.string   :stamp, null: false
       t.string   :status
       t.text     :reply_excerpt
@@ -26,8 +22,6 @@ class AddScheduledAgents < ActiveRecord::Migration[8.1]
     add_column :ai_agents, :cron,          :string
     add_column :ai_agents, :schedule_changed_at, :datetime
     add_column :ai_agents, :created_by_id, :integer
-    # Legacy rows may have no key. SQL Server needs a filtered index to allow
-    # several NULLs; the other supported adapters allow them in a unique index.
     key_index_options = { unique: true }
     key_index_options[:where] = 'agent_key IS NOT NULL' if connection.adapter_name == 'SQLServer'
     add_index :ai_agents, :agent_key, **key_index_options
@@ -37,6 +31,15 @@ class AddScheduledAgents < ActiveRecord::Migration[8.1]
   end
 
   def down
+    AiAgent.reset_column_information
+    default_agent = AiAgent.find_by(agent_key: AGENT_KEY)
+    unless default_agent
+      raise ActiveRecord::IrreversibleMigration,
+            "Cannot preserve the default #{AGENT_NAME} row because agent_key=#{AGENT_KEY.inspect} was not found"
+    end
+
+    AiAgent.where.not(id: default_agent.id).find_each(&:destroy!)
+
     remove_index :ai_agents, :agent_key
     remove_columns :ai_agents, :agent_key, :task, :cron, :schedule_changed_at, :created_by_id
     drop_table :ai_agent_runs
@@ -44,16 +47,11 @@ class AddScheduledAgents < ActiveRecord::Migration[8.1]
 
   private
 
-  # Only the default agent is seeded — every other agent is created from the
-  # UI. A row already holding either name is adopted rather than duplicated,
-  # so its chat history stays attached.
   def seed_default_agent
     record = AiAgent.find_by(agent_key: AGENT_KEY) ||
-             AiAgent.named(AGENT_NAME).first ||
-             AiAgent.named(OLD_AGENT_NAME).first ||
-             AiAgent.new
-    record.assign_attributes(name: AGENT_NAME, agent_key: AGENT_KEY,
-                             task: '', cron: nil, description: '')
+             AiAgent.named(AGENT_NAME).first
+    record ||= AiAgent.new(name: AGENT_NAME, description: AGENT_DESCRIPTION)
+    record.assign_attributes(agent_key: AGENT_KEY, task: '', cron: nil)
     record.save!
   end
 end
