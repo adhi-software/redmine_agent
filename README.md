@@ -37,10 +37,10 @@ For any Customization/Support, please contact us, our consulting team will be ha
 Adhi Software Pvt Ltd<br>
 12/B-35, 6th Cross Road<br>
 SIPCOT IT Park, Siruseri<br>
-Kancheepuram Dist<br>
+Chengalpattu Dist<br>
 Tamilnadu - 603103<br>
 India
 
 Website: [https://www.adhisoftware.co.in](https://www.adhisoftware.co.in)<br>
 Email: info@adhisoftware.co.in<br>
-Phone: +91 44 27470401
+Phone: +91 44 46612534
