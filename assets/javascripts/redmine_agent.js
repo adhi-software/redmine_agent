@@ -4,19 +4,31 @@ document.addEventListener('DOMContentLoaded', function () {
 
   var form = document.getElementById('agent-chat-form');
   var input = document.getElementById('agent-chat-input');
+  var attachmentInput = document.getElementById('agent-chat-attachment');
+  var attachBtn = document.getElementById('agent-chat-attach');
+  var attachmentPreview = document.getElementById('agent-chat-attachment-preview');
+  var chatInputWrapper = document.querySelector('.chat-input-wrapper');
+  var pendingAttachments = [];
+  var attachmentPreviewUrls = [];
+  var attachmentError = '';
+  var MAX_ATTACHMENTS = parseInt(page.getAttribute('data-max-attachments'), 10);
+  var MAX_ATTACHMENTS_BYTES = parseInt(page.getAttribute('data-max-attachments-bytes'), 10);
   var sendBtn = document.getElementById('agent-chat-send');
   var messages = document.getElementById('agent-chat-messages');
+  var chatArea = document.getElementById('agent-chat-area');
   var newBtn = document.getElementById('agent-new-chat');
   var historyBtn = document.getElementById('agent-history-chat');
   var historyPanel = document.getElementById('agent-history-panel');
   var historyList = document.getElementById('agent-history-list');
   var historyClose = document.getElementById('agent-history-close');
   var clearBtn = document.getElementById('agent-clear-chat');
+  // Set on a scheduled agent's page, blank on the Query Agent's. A scheduled
+  // agent's page shows its whole history and has no chat buttons at all.
+  var currentAgentKey = page.getAttribute('data-current-agent-key') || '';
   var busy = false;
   var chatUrl = page.getAttribute('data-chat-url');
   var historyUrl = page.getAttribute('data-history-url');
   var clearUrl = page.getAttribute('data-clear-url');
-  var greeting = page.getAttribute('data-greeting');
   var hitlEnabled = page.getAttribute('data-hitl') === '1';
   var csrfToken = document.querySelector('meta[name="csrf-token"]');
 
@@ -27,15 +39,27 @@ document.addEventListener('DOMContentLoaded', function () {
     deleteTitle: page.getAttribute('data-i18n-delete-title'),
     deleteConfirm: page.getAttribute('data-i18n-delete-confirm'),
     deleteError: page.getAttribute('data-i18n-delete-error'),
+    clearConfirm: page.getAttribute('data-i18n-clear-confirm'),
     unreachable: page.getAttribute('data-i18n-unreachable'),
     approvalApprove: page.getAttribute('data-i18n-approval-approve'),
-    approvalReject: page.getAttribute('data-i18n-approval-reject')
+    approvalReject: page.getAttribute('data-i18n-approval-reject'),
+    runFailed: page.getAttribute('data-i18n-run-failed'),
+    attachFile: page.getAttribute('data-i18n-attach-file'),
+    removeFile: page.getAttribute('data-i18n-remove-file'),
+    close: page.getAttribute('data-i18n-close'),
+    attachmentsTooMany: page.getAttribute('data-i18n-attachments-too-many'),
+    attachmentsTooLarge: page.getAttribute('data-i18n-attachments-too-large')
   };
 
   var currentChatId = null;
 
   function setHasMessages(state) {
     if (clearBtn) clearBtn.disabled = !state;
+  }
+
+  // Empty chat: CSS floats the composer to the middle of the area.
+  function setComposerCentered(on) {
+    if (form && chatArea) chatArea.classList.toggle('agent-chat-empty', on);
   }
 
   function newChatId() {
@@ -46,18 +70,79 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
-  (function initChat() {
-    var el = document.getElementById('agent-initial-chat');
-    var chat = null;
+  (function initTimeline() {
+    var el = document.getElementById('agent-initial-chats');
+    var data = null;
     if (el) {
-      try { chat = JSON.parse(el.textContent); } catch (e) { chat = null; }
+      try { data = JSON.parse(el.textContent); } catch (e) { data = null; }
     }
-    if (chat) {
-      loadChat(chat);
-    } else {
-      currentChatId = newChatId();
-    }
+    loadTimeline(data || {});
   })();
+
+  // Everything this page has to show, oldest at the top: one block per chat,
+  // plus the runs that failed before reaching the chat. Typing continues the
+  // newest chat, as it always has.
+  function loadTimeline(data) {
+    var chats = data.chats || [];
+    var last = chats[chats.length - 1] || null;
+    var entries = chats.map(function (chat) { return { at: chat.created_at, chat: chat }; })
+      .concat((data.failed_runs || []).map(function (run) { return { at: run.at, run: run }; }));
+    // ISO 8601 stamps, so a plain string compare is chronological.
+    entries.sort(function (a, b) { return String(a.at).localeCompare(String(b.at)); });
+
+    messages.innerHTML = '';
+    entries.forEach(function (entry) {
+      messages.appendChild(entry.chat ? buildChatBlock(entry.chat, entry.chat === last)
+        : buildRunErrorBlock(entry.run));
+    });
+
+    currentChatId = last ? last.chat_id : newChatId();
+    // A scheduled agent's clear takes the whole page, failed runs included.
+    setHasMessages(currentAgentKey ? entries.length > 0 : !!last);
+    if (!entries.length) showWelcome();
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  // isCurrent: only the newest chat's last reply can still be awaiting approval.
+  function buildChatBlock(chat, isCurrent) {
+    var block = document.createElement('div');
+    block.className = 'agent-chat-block';
+    if (currentAgentKey) block.appendChild(runSeparator(chat.created_at));
+
+    var exchanges = chat.exchanges || [];
+    exchanges.forEach(function (ex, index) {
+      appendMessage(ex.request, 'user', block, ex.attachments);
+      renderAgentResponse({ type: 'html', html: ex.html, reply: ex.reply },
+        isCurrent && index === exchanges.length - 1, block);
+    });
+    return block;
+  }
+
+  // Every scheduled run is a chat of its own, so the page marks where each one
+  // starts. Clearing is all-or-nothing, from the header.
+  function runSeparator(at) {
+    var sep = document.createElement('div');
+    sep.className = 'agent-run-sep';
+
+    var label = document.createElement('span');
+    label.className = 'agent-run-sep-label';
+    label.textContent = at ? shortStamp(at) : '';
+    sep.appendChild(label);
+    return sep;
+  }
+
+  // A run that failed never said anything, so its entry is just the reason.
+  function buildRunErrorBlock(run) {
+    var block = document.createElement('div');
+    block.className = 'agent-chat-block';
+    block.appendChild(runSeparator(run.at));
+
+    var line = document.createElement('div');
+    line.className = 'agent-run-error';
+    line.textContent = i18n.runFailed + (run.error ? ': ' + run.error : '');
+    block.appendChild(line);
+    return block;
+  }
 
   // ── New chat button ──
   if (newBtn) {
@@ -87,13 +172,13 @@ document.addEventListener('DOMContentLoaded', function () {
 
   // Close the history popup when clicking anywhere outside it.
   document.addEventListener('click', function (e) {
-    if (historyPanel.hidden) return;
+    if (!historyPanel || historyPanel.hidden) return;
     if (historyPanel.contains(e.target)) return;
     hideHistoryPanel();
   });
 
   function hideHistoryPanel() {
-    historyPanel.hidden = true;
+    if (historyPanel) historyPanel.hidden = true;
   }
 
   function loadHistory() {
@@ -187,24 +272,19 @@ document.addEventListener('DOMContentLoaded', function () {
 
   function loadChat(chat) {
     hideHistoryPanel();
+    setComposerCentered(false);
     messages.innerHTML = '';
-    clearWelcome();
-    var exchanges = chat.exchanges || [];
-    exchanges.forEach(function (ex, index) {
-      appendMessage(ex.request, 'user');
-      var isLast = (index === exchanges.length - 1);
-      renderAgentResponse({ type: 'html', html: ex.html, reply: ex.reply }, isLast);
-    });
+    messages.appendChild(buildChatBlock(chat, true));
     currentChatId = chat.chat_id;
     setHasMessages(true);
   }
 
-  // ── Delete (current chat) button ──
+  // ── Delete button: one chat here, a scheduled agent's whole log there ──
   if (clearBtn) {
     clearBtn.addEventListener('click', function () {
       if (clearBtn.disabled) return;
-      if (!window.confirm(i18n.deleteConfirm)) return;
-      deleteCurrentChat();
+      if (!window.confirm(currentAgentKey ? i18n.clearConfirm : i18n.deleteConfirm)) return;
+      if (currentAgentKey) clearAllChats(); else deleteCurrentChat();
     });
   }
 
@@ -228,12 +308,31 @@ document.addEventListener('DOMContentLoaded', function () {
       });
   }
 
+  // Wipes this agent's whole history — every chat and its run log.
+  function clearAllChats() {
+    fetch(clearUrl, {
+      method: 'DELETE',
+      headers: jsonHeaders(),
+      body: JSON.stringify({ all: '1' })
+    })
+      .then(function (res) { return res.json(); })
+      .then(function () {
+        clearChat();
+        currentChatId = newChatId();
+        setHasMessages(false);
+      })
+      .catch(function () {
+        window.alert(i18n.deleteError);
+      });
+  }
+
   function clearChat() {
     messages.innerHTML = '';
     showWelcome();
   }
 
   function showWelcome() {
+    setComposerCentered(true);
     if (messages.querySelector('.agent-welcome')) return;
     var div = document.createElement('div');
     div.className = 'agent-welcome';
@@ -255,17 +354,86 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   function clearWelcome() {
+    setComposerCentered(false);
     var w = messages.querySelector('.agent-welcome');
     if (w) w.remove();
   }
 
-  function appendMessage(text, sender) {
+  function appendMessage(text, sender, target, attachments) {
     clearWelcome();
     var el = document.createElement('div');
     el.className = 'redmine-agent-msg ' + sender;
     el.textContent = text;
-    messages.appendChild(el);
+    if (sender === 'user') appendAttachmentImages(el, attachments);
+    (target || messages).appendChild(el);
     messages.scrollTop = messages.scrollHeight;
+  }
+
+  function appendAttachmentImages(message, attachments) {
+    (attachments || []).forEach(function (attachment) {
+      var isLocalImage = attachment instanceof File && /^image\//.test(attachment.type);
+      if (!isLocalImage && !attachment.image) return;
+
+      var image = document.createElement('img');
+      image.className = 'agent-chat-message-image';
+      image.alt = attachment.filename || attachment.name || '';
+      if (isLocalImage) {
+        image.src = URL.createObjectURL(attachment);
+        image.addEventListener('load', function () { URL.revokeObjectURL(image.src); }, { once: true });
+      } else {
+        image.src = attachment.url;
+      }
+      image.tabIndex = 0;
+      image.setAttribute('role', 'button');
+      image.addEventListener('click', function () {
+        openImagePreview(isLocalImage ? URL.createObjectURL(attachment) : attachment.url,
+                         image.alt, isLocalImage);
+      });
+      image.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter' || event.key === ' ') image.click();
+      });
+      message.appendChild(image);
+    });
+  }
+
+  function openImagePreview(source, name, revokeOnClose) {
+    var viewer = document.createElement('div');
+    viewer.className = 'agent-image-viewer';
+    viewer.setAttribute('role', 'dialog');
+    viewer.setAttribute('aria-modal', 'true');
+    viewer.setAttribute('aria-label', name || i18n.attachFile);
+
+    var panel = document.createElement('div');
+    panel.className = 'agent-image-viewer-panel';
+    var image = document.createElement('img');
+    image.src = source;
+    image.alt = name || '';
+    var close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'agent-image-viewer-close';
+    close.setAttribute('aria-label', i18n.close);
+    close.textContent = '\u00d7';
+
+    function closeViewer() {
+      document.removeEventListener('keydown', closeOnEscape);
+      viewer.remove();
+      if (revokeOnClose) URL.revokeObjectURL(source);
+    }
+
+    function closeOnEscape(event) {
+      if (event.key === 'Escape') closeViewer();
+    }
+
+    close.addEventListener('click', closeViewer);
+    viewer.addEventListener('click', function (event) {
+      if (event.target === viewer) closeViewer();
+    });
+    document.addEventListener('keydown', closeOnEscape);
+    panel.appendChild(image);
+    panel.appendChild(close);
+    viewer.appendChild(panel);
+    document.body.appendChild(viewer);
+    close.focus();
   }
 
   // Marker the server adds when a write tool is paused for approval. Matched
@@ -283,7 +451,7 @@ document.addEventListener('DOMContentLoaded', function () {
     return (text || '').replace(/\[\s*AWAITING_APPROVAL[^\]]*\]/gi, '');
   }
 
-  function renderAgentResponse(data, isLast) {
+  function renderAgentResponse(data, isLast, target) {
     if (isLast === undefined) isLast = true;
     clearWelcome();
     var el = document.createElement('div');
@@ -308,7 +476,7 @@ document.addEventListener('DOMContentLoaded', function () {
       el.textContent = stripApprovalMarker(data.reply).trim();
     }
 
-    messages.appendChild(el);
+    (target || messages).appendChild(el);
     messages.scrollTop = messages.scrollHeight;
   }
 
@@ -377,7 +545,111 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   function updateSendButton() {
-    if (sendBtn) sendBtn.disabled = busy || input.value.trim() === '';
+    var hasAttachments = selectedAttachments().length > 0;
+    if (sendBtn && input) sendBtn.disabled = busy || (input.value.trim() === '' && !hasAttachments);
+    if (attachBtn) attachBtn.disabled = busy;
+  }
+
+  function selectedAttachments() {
+    return pendingAttachments;
+  }
+
+  function clearAttachment() {
+    pendingAttachments = [];
+    attachmentError = '';
+    if (attachmentInput) attachmentInput.value = '';
+    renderAttachmentPreview();
+    updateSendButton();
+  }
+
+  function releaseAttachmentPreviewUrls() {
+    attachmentPreviewUrls.forEach(function (url) { URL.revokeObjectURL(url); });
+    attachmentPreviewUrls = [];
+  }
+
+  document.addEventListener('click', function (event) {
+    if (!attachmentPreview) return;
+    Array.prototype.forEach.call(
+      attachmentPreview.querySelectorAll('.agent-chat-attachment-thumbnail.expanded'),
+      function (image) {
+        if (event.target === image) return;
+        image.classList.remove('expanded');
+        image.closest('.agent-chat-attachment-chip').classList.remove('image-expanded');
+      }
+    );
+  });
+
+  function renderAttachmentPreview() {
+    var files = selectedAttachments();
+    if (!attachmentPreview) return;
+    releaseAttachmentPreviewUrls();
+    attachmentPreview.innerHTML = '';
+    attachmentPreview.hidden = files.length === 0 && !attachmentError;
+    files.forEach(function (file) {
+      var chip = document.createElement('span');
+      chip.className = 'agent-chat-attachment-chip';
+      if (/^image\//.test(file.type) && window.URL && URL.createObjectURL) {
+        var thumbnail = document.createElement('img');
+        var thumbnailUrl = URL.createObjectURL(file);
+        attachmentPreviewUrls.push(thumbnailUrl);
+        thumbnail.className = 'agent-chat-attachment-thumbnail';
+        thumbnail.src = thumbnailUrl;
+        thumbnail.alt = file.name;
+        thumbnail.tabIndex = 0;
+        thumbnail.setAttribute('role', 'button');
+        thumbnail.addEventListener('click', function () {
+          var expanded = thumbnail.classList.toggle('expanded');
+          chip.classList.toggle('image-expanded', expanded);
+        });
+        thumbnail.addEventListener('keydown', function (event) {
+          if (event.key === 'Enter' || event.key === ' ') thumbnail.click();
+        });
+        chip.appendChild(thumbnail);
+      }
+      var name = document.createElement('span');
+      name.textContent = file.name;
+      var remove = document.createElement('button');
+      remove.type = 'button';
+      remove.title = i18n.removeFile;
+      remove.setAttribute('aria-label', i18n.removeFile);
+      remove.textContent = '\u00d7';
+      remove.addEventListener('click', function () {
+        pendingAttachments = pendingAttachments.filter(function (selected) { return selected !== file; });
+        attachmentError = attachmentValidationError(pendingAttachments);
+        renderAttachmentPreview();
+        updateSendButton();
+      });
+      chip.appendChild(name);
+      chip.appendChild(remove);
+      attachmentPreview.appendChild(chip);
+    });
+    if (attachmentError) {
+      var error = document.createElement('div');
+      error.className = 'agent-chat-attachment-error';
+      error.textContent = attachmentError;
+      attachmentPreview.appendChild(error);
+    }
+  }
+
+  function attachmentValidationError(files) {
+    if (files.length > MAX_ATTACHMENTS) return i18n.attachmentsTooMany;
+    var total = files.reduce(function (sum, file) { return sum + file.size; }, 0);
+    return total > MAX_ATTACHMENTS_BYTES ? i18n.attachmentsTooLarge : '';
+  }
+
+  function addAttachments(files) {
+    var candidate = pendingAttachments.slice();
+    Array.prototype.slice.call(files || []).forEach(function (file) {
+      var alreadySelected = candidate.some(function (selected) {
+        return selected.name === file.name && selected.size === file.size && selected.lastModified === file.lastModified;
+      });
+      if (!alreadySelected) candidate.push(file);
+    });
+
+    attachmentError = attachmentValidationError(candidate);
+    pendingAttachments = attachmentError ? pendingAttachments : candidate;
+    renderAttachmentPreview();
+    updateSendButton();
   }
 
   function setBusy(state) {
@@ -385,17 +657,27 @@ document.addEventListener('DOMContentLoaded', function () {
     updateSendButton();
   }
 
-  function sendMessage(text) {
+  function sendMessage(text, attachments) {
     if (!currentChatId) currentChatId = newChatId();
     setBusy(true);
     showLoading();
+    var body;
+    var headers = { 'X-CSRF-Token': csrfToken ? csrfToken.content : '' };
+    if (attachments && attachments.length) {
+      body = new FormData();
+      body.append('message', text);
+      body.append('chat_id', currentChatId);
+      attachments.forEach(function (attachment) {
+        body.append('attachments[]', attachment, attachment.name);
+      });
+    } else {
+      headers['Content-Type'] = 'application/json';
+      body = JSON.stringify({ message: text, chat_id: currentChatId });
+    }
     fetch(chatUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-CSRF-Token': csrfToken ? csrfToken.content : ''
-      },
-      body: JSON.stringify({ message: text, chat_id: currentChatId })
+      headers: headers,
+      body: body
     })
       .then(function (res) { return res.json(); })
       .then(function (data) {
@@ -417,34 +699,683 @@ document.addEventListener('DOMContentLoaded', function () {
     input.style.height = Math.min(input.scrollHeight, 160) + 'px';
   }
 
-  input.addEventListener('input', function () {
-    updateSendButton();
-    autoGrowInput();
-  });
+  // A scheduled agent's page renders no composer, so there is nothing to wire.
+  if (input && form) {
+    input.addEventListener('input', function () {
+      updateSendButton();
+      autoGrowInput();
+    });
 
-  // Enter submits; Shift+Enter (or Ctrl/Cmd+Enter) inserts a newline.
-  input.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.isComposing) {
-      e.preventDefault();
-      if (typeof form.requestSubmit === 'function') {
-        form.requestSubmit();
-      } else {
-        form.dispatchEvent(new Event('submit', { cancelable: true }));
+    // Enter submits; Shift+Enter (or Ctrl/Cmd+Enter) inserts a newline.
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.isComposing) {
+        e.preventDefault();
+        if (typeof form.requestSubmit === 'function') {
+          form.requestSubmit();
+        } else {
+          form.dispatchEvent(new Event('submit', { cancelable: true }));
+        }
       }
+    });
+
+    if (attachBtn && attachmentInput) {
+      attachBtn.addEventListener('click', function () { if (!busy) attachmentInput.click(); });
+      attachmentInput.addEventListener('change', function () {
+        // Reset the picker so subsequent + selections can add more files.
+        var files = Array.prototype.slice.call(attachmentInput.files || []);
+        attachmentInput.value = '';
+        addAttachments(files);
+      });
     }
-  });
 
-  form.addEventListener('submit', function (e) {
-    e.preventDefault();
-    if (busy) return;
-    var text = input.value.trim();
-    if (!text) return;
-    appendMessage(text, 'user');
-    input.value = '';
+    if (chatInputWrapper) {
+      ['dragenter', 'dragover'].forEach(function (eventName) {
+        chatInputWrapper.addEventListener(eventName, function (event) {
+          if (!event.dataTransfer || !Array.prototype.includes.call(event.dataTransfer.types, 'Files')) return;
+          event.preventDefault();
+          if (!busy) chatInputWrapper.classList.add('agent-chat-drop-active');
+        });
+      });
+      chatInputWrapper.addEventListener('dragleave', function (event) {
+        if (!chatInputWrapper.contains(event.relatedTarget)) chatInputWrapper.classList.remove('agent-chat-drop-active');
+      });
+      chatInputWrapper.addEventListener('drop', function (event) {
+        event.preventDefault();
+        chatInputWrapper.classList.remove('agent-chat-drop-active');
+        if (!busy && event.dataTransfer) addAttachments(event.dataTransfer.files);
+      });
+    }
+
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      if (busy) return;
+      var text = input.value.trim();
+      var attachments = selectedAttachments();
+      if (!text && !attachments.length) return;
+      appendMessage(text || ('Attached files: ' + attachments.map(function (file) { return file.name; }).join(', ')), 'user', null, attachments);
+      input.value = '';
+      updateSendButton();
+      autoGrowInput();
+      sendMessage(text, attachments);
+      clearAttachment();
+    });
+
     updateSendButton();
-    autoGrowInput();
-    sendMessage(text);
+  }
+
+  // ── Agent management (your own agents) ──
+  var customAgentsUrl = page.getAttribute('data-custom-agents-url');
+  if (!customAgentsUrl) return;
+
+  var editAgentBtn = document.getElementById('agent-edit-agent');
+  // A run is over in seconds normally; the cap covers the runner's own timeout.
+  var RUN_POLL_MS = 2000;
+  var RUN_POLL_MAX = 155;
+
+  var runAgentBtn = document.getElementById('agent-run-agent');
+  var deleteAgentBtn = document.getElementById('agent-delete-agent');
+  var addAgentBtn = document.getElementById('agent-add-agent');
+
+  var ai18n = {
+    editAgent: page.getAttribute('data-i18n-edit-agent'),
+    addAgent: page.getAttribute('data-i18n-add-agent'),
+    agentName: page.getAttribute('data-i18n-agent-name'),
+    agentTask: page.getAttribute('data-i18n-agent-task'),
+    agentTaskHint: page.getAttribute('data-i18n-agent-task-hint'),
+    samplesLink: page.getAttribute('data-i18n-task-samples-link'),
+    samplesHide: page.getAttribute('data-i18n-task-samples-hide'),
+    sample1Title: page.getAttribute('data-i18n-task-sample-1-title'),
+    sample1: page.getAttribute('data-i18n-task-sample-1'),
+    sample2Title: page.getAttribute('data-i18n-task-sample-2-title'),
+    sample2: page.getAttribute('data-i18n-task-sample-2'),
+    deliveryHint: page.getAttribute('data-i18n-task-delivery-hint'),
+    notifyChannels: page.getAttribute('data-notify-channels'),
+    agentSchedule: page.getAttribute('data-i18n-agent-schedule'),
+    freqLabel: page.getAttribute('data-i18n-schedule-frequency'),
+    freqOnce: page.getAttribute('data-i18n-schedule-once'),
+    freqHourly: page.getAttribute('data-i18n-schedule-hourly'),
+    everyLabel: page.getAttribute('data-i18n-schedule-every'),
+    hoursLabel: page.getAttribute('data-i18n-schedule-hours'),
+    freqDaily: page.getAttribute('data-i18n-schedule-daily'),
+    freqWeekdays: page.getAttribute('data-i18n-schedule-weekdays'),
+    freqWeekly: page.getAttribute('data-i18n-schedule-weekly'),
+    freqMonthly: page.getAttribute('data-i18n-schedule-monthly'),
+    timeLabel: page.getAttribute('data-i18n-schedule-time'),
+    weekdayLabel: page.getAttribute('data-i18n-schedule-weekday'),
+    dayLabel: page.getAttribute('data-i18n-schedule-day'),
+    dayWarning: page.getAttribute('data-i18n-schedule-day-warning'),
+    save: page.getAttribute('data-i18n-save'),
+    saving: page.getAttribute('data-i18n-saving'),
+    saveFailed: page.getAttribute('data-i18n-save-failed'),
+    cancel: page.getAttribute('data-i18n-cancel'),
+    deleteAgentConfirm: page.getAttribute('data-i18n-delete-agent-confirm'),
+    deleteAgent: page.getAttribute('data-i18n-delete-agent'),
+    clearLog: page.getAttribute('data-i18n-clear-log'),
+    runNow: page.getAttribute('data-i18n-run-now'),
+    running: page.getAttribute('data-i18n-running'),
+    timezone: page.getAttribute('data-i18n-schedule-timezone'),
+    dayNames: (page.getAttribute('data-i18n-day-names') || '').split(','),
+    errNameBlank: page.getAttribute('data-i18n-error-name-blank'),
+    errTaskBlank: page.getAttribute('data-i18n-error-task-blank'),
+    errSchedule: page.getAttribute('data-i18n-error-schedule')
+  };
+
+  // Zone new schedules are saved in; existing ones keep whatever their cron has.
+  var defaultTimezone = page.getAttribute('data-agent-timezone') || '';
+
+  function jsonHeaders() {
+    return { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken ? csrfToken.content : '' };
+  }
+
+  // Fetched fresh so the form always opens on what is stored.
+  function withAgent(key, callback) {
+    fetch(customAgentsUrl, { headers: { 'Accept': 'application/json' } })
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        var agent = (data.agents || []).filter(function (a) { return a.key === key; })[0];
+        if (agent) callback(agent);
+      });
+  }
+
+  if (editAgentBtn) {
+    editAgentBtn.addEventListener('click', function () { withAgent(currentAgentKey, openAgentForm); });
+  }
+
+  function setRunButtonBusy(btn, isBusy) {
+    if (!btn) return;
+    btn.disabled = isBusy;
+    btn.title = isBusy ? ai18n.running : ai18n.runNow;
+    btn.setAttribute('aria-label', isBusy ? ai18n.running : ai18n.runNow);
+    btn.setAttribute('aria-busy', isBusy ? 'true' : 'false');
+    btn.classList.toggle('agent-run-pending', isBusy);
+
+    // A nav-row action is normally visible only on hover. Keep its spinner in
+    // view after the pointer leaves so the running state cannot disappear.
+    var row = btn.closest && btn.closest('li.agent-row');
+    if (row) row.classList.toggle('agent-run-active', isBusy);
+  }
+
+  function setAgentRunBusy(key, isBusy) {
+    // The selected agent has a Run Now action in both the page header and its
+    // left-nav row. Keep every representation locked to the same run state.
+    if (key === currentAgentKey) setRunButtonBusy(runAgentBtn, isBusy);
+    Array.prototype.forEach.call(document.querySelectorAll('.agent-row-actions'), function (box) {
+      if (box.getAttribute('data-agent-key') !== key) return;
+      setRunButtonBusy(box.querySelector('[data-agent-action="run"]'), isBusy);
+    });
+  }
+
+  // Every agent can be run on demand - a schedule is not what makes it runnable.
+  if (runAgentBtn) {
+    runAgentBtn.addEventListener('click', function () {
+      setAgentRunBusy(currentAgentKey, true);
+      fetch(customAgentsUrl + '/' + currentAgentKey + '/run', { method: 'POST', headers: jsonHeaders() })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          if (!data || !data.run_id) throw new Error('run not started');
+          pollRun(currentAgentKey, data.run_id, 0, function () { window.location.reload(); });
+        })
+        .catch(function () {
+          setAgentRunBusy(currentAgentKey, false);
+        });
+    });
+  }
+
+  // The run happens in the background, so the caller waits for its log row to
+  // leave 'started' before showing what it wrote.
+  function pollRun(key, runId, attempt, done) {
+    if (attempt >= RUN_POLL_MAX) { done(); return; }
+
+    window.setTimeout(function () {
+      fetch(customAgentsUrl + '/' + key + '/runs', { headers: jsonHeaders() })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          var match = (data.runs || []).filter(function (run) { return run.id === runId; })[0];
+          if (match && match.status !== 'started') { done(); return; }
+          pollRun(key, runId, attempt + 1, done);
+        })
+        .catch(function () { done(); });
+    }, RUN_POLL_MS);
+  }
+
+  if (deleteAgentBtn) {
+    deleteAgentBtn.addEventListener('click', function () {
+      if (!window.confirm(ai18n.deleteAgentConfirm)) return;
+      fetch(customAgentsUrl + '/' + currentAgentKey, { method: 'DELETE', headers: jsonHeaders() })
+        .then(function (r) { return r.json(); })
+        // This page goes with the agent; the bare URL is the Query Agent's.
+        .then(function () { window.location.href = window.location.pathname; });
+    });
+  }
+
+  // Seconds are noise on a run separator.
+  function shortStamp(value) {
+    return new Date(value).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+  }
+
+  function agentMenuList() {
+    var link = document.querySelector('#main-menu a[href*="/redmine_agent"]');
+    return link ? link.closest('ul') : null;
+  }
+
+  function applyAgentMenuEntry(menu) {
+    if (!menu) return;
+    var ul = agentMenuList();
+    if (!ul) return;
+    var existing = ul.querySelector('a[href="' + menu.url + '"]');
+    if (existing) { existing.textContent = menu.name; return; }
+    var li = document.createElement('li');
+    var a = document.createElement('a');
+    a.href = menu.url;
+    a.className = 'ai-agent-' + menu.key;
+    a.textContent = menu.name;
+    // The theme only decorates menu links once, on load, so borrow a sibling's
+    // icon rather than leaving this row bare until the next page load.
+    var icon = ul.querySelector('li > svg');
+    if (icon) li.appendChild(icon.cloneNode(true));
+    li.appendChild(a);
+    ul.appendChild(li);
+    decorateAgentMenuRows();
+  }
+
+  // ── Per-agent actions on the left-nav rows ──
+  // The header's actions, reachable on any of your agents without opening it.
+  // The shared Chat agent is not one you manage, so its row gets none.
+  var ROW_ACTIONS = [
+    { action: 'edit',   title: ai18n.editAgent },
+    { action: 'run',    title: ai18n.runNow }
+  ];
+
+  function agentKeyFromHref(href) {
+    var match = /[?&]agent_key=([^&]+)/.exec(href || '');
+    return match ? decodeURIComponent(match[1]) : '';
+  }
+
+  function decorateAgentMenuRows() {
+    var ul = agentMenuList();
+    if (!ul) return;
+    Array.prototype.forEach.call(ul.querySelectorAll('a[href*="agent_key="]'), function (link) {
+      var key = agentKeyFromHref(link.getAttribute('href'));
+      var li = link.closest('li');
+      if (!key || key === 'query' || !li || li.classList.contains('agent-row')) return;
+      li.classList.add('agent-row');
+
+      var box = document.createElement('span');
+      box.className = 'agent-row-actions';
+      box.setAttribute('data-agent-key', key);
+      ROW_ACTIONS.forEach(function (spec) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.title = spec.title || '';
+        // Icon comes from CSS: an svg here would make the theme's icon pass
+        // treat the row as already decorated and skip its own menu icon.
+        btn.className = 'act-' + spec.action + (spec.cls ? ' ' + spec.cls : '');
+        btn.setAttribute('data-agent-action', spec.action);
+        box.appendChild(btn);
+      });
+      li.appendChild(box);
+    });
+  }
+
+  // Delegated: rows come and go as agents are created and deleted.
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest && e.target.closest('.agent-row-actions button');
+    if (!btn) return;
+    e.preventDefault();
+    var box = btn.parentNode;
+    var key = box.getAttribute('data-agent-key');
+    var action = btn.getAttribute('data-agent-action');
+    if (action === 'edit') withAgent(key, openAgentForm);
+    else if (action === 'run') runAgentRow(btn, key);
+    else if (action === 'clear') clearAgentLog(key);
+    else if (action === 'delete') deleteAgentRow(box, key);
   });
 
-  updateSendButton();
+  function runAgentRow(btn, key) {
+    if (btn.disabled) return;
+    setAgentRunBusy(key, true);
+    fetch(customAgentsUrl + '/' + key + '/run', { method: 'POST', headers: jsonHeaders() })
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        if (!data || !data.run_id) throw new Error('run not started');
+        pollRun(key, data.run_id, 0, function () {
+          // Only the open agent's page shows what the run wrote.
+          if (key === currentAgentKey) { window.location.reload(); return; }
+          setAgentRunBusy(key, false);
+        });
+      })
+      .catch(function () {
+        setAgentRunBusy(key, false);
+      });
+  }
+
+  function clearAgentLog(key) {
+    if (!window.confirm(i18n.clearConfirm)) return;
+    fetch(clearUrl.split('?')[0] + '?agent_key=' + encodeURIComponent(key),
+      { method: 'DELETE', headers: jsonHeaders(), body: JSON.stringify({ all: '1' }) })
+      .then(function (res) { return res.json(); })
+      .then(function () {
+        if (key !== currentAgentKey) return;
+        clearChat();
+        currentChatId = newChatId();
+        setHasMessages(false);
+      });
+  }
+
+  function deleteAgentRow(box, key) {
+    if (!window.confirm(ai18n.deleteAgentConfirm)) return;
+    fetch(customAgentsUrl + '/' + key, { method: 'DELETE', headers: jsonHeaders() })
+      .then(function (res) { return res.json(); })
+      .then(function () {
+        // This page goes with the agent; the bare URL is the Query Agent's.
+        if (key === currentAgentKey) { window.location.href = window.location.pathname; return; }
+        var li = box.parentNode;
+        if (li && li.parentNode) li.parentNode.removeChild(li);
+      });
+  }
+
+  // ── Create / edit form (modal) ──
+  function labeled(label, field) {
+    var wrap = document.createElement('div');
+    wrap.className = 'agent-form-field';
+    wrap.appendChild(label);
+    wrap.appendChild(field);
+    return wrap;
+  }
+
+  function textLabel(text) {
+    var l = document.createElement('label');
+    l.textContent = text;
+    return l;
+  }
+
+  function parseCronForForm(cron) {
+    if (!cron) {
+      return {
+        frequency: 'once', time: '09:00', weekday: '0', day: '1',
+        every: '4', minute: '0', timezone: defaultTimezone
+      };
+    }
+    var parts = cron.trim().split(/\s+/);
+    var min = parts[0], hour = parts[1], dom = parts[2], dow = parts[4], tz = parts[5] || defaultTimezone;
+    var time = (hour.length < 2 ? '0' + hour : hour) + ':' + (min.length < 2 ? '0' + min : min);
+    var frequency = 'daily', weekday = '0', day = '1', every = '4', minute = '0';
+    // An hour step ("*/4") or a bare "*" is an interval, not a time of day.
+    var step = /^\*\/(\d+)$/.exec(hour);
+    if (step || hour === '*') {
+      frequency = 'hourly';
+      every = step ? step[1] : '1';
+      minute = String(parseInt(min, 10) || 0);
+    }
+    else if (dow === '1-5') { frequency = 'weekdays'; }
+    else if (dow !== '*') { frequency = 'weekly'; weekday = dow; }
+    else if (dom !== '*') { frequency = 'monthly'; day = dom; }
+    return {
+      frequency: frequency, time: time, weekday: weekday, day: day,
+      every: every, minute: minute, timezone: tz
+    };
+  }
+
+  function ensureAgentModal() {
+    var modal = document.getElementById('agent-form-modal');
+    if (modal) return modal;
+    modal = document.createElement('div');
+    modal.id = 'agent-form-modal';
+    modal.className = 'agent-modal-backdrop';
+    modal.hidden = true;
+    document.body.appendChild(modal);
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && !modal.hidden) closeAgentForm();
+    });
+    return modal;
+  }
+
+  function closeAgentForm() {
+    var modal = document.getElementById('agent-form-modal');
+    if (!modal) return;
+    modal.hidden = true;
+    // Core's warnLeavingUnsaved scans every textarea in the document and only
+    // clears the flag on a real form submit — this form saves over fetch, so a
+    // left-behind task field would warn on every later navigation. The form is
+    // rebuilt on each open anyway.
+    modal.innerHTML = '';
+  }
+
+  function openAgentForm(agent) {
+    var modal = ensureAgentModal();
+    var isEdit = !!(agent && agent.key);
+    var initial = agent || {};
+    var sched = parseCronForForm(initial.cron);
+
+    modal.innerHTML = '';
+    var box = document.createElement('div');
+    box.className = 'agent-modal';
+
+    var title = document.createElement('h3');
+    title.textContent = isEdit ? ai18n.editAgent : ai18n.addAgent;
+    box.appendChild(title);
+
+    var form = document.createElement('div');
+    form.className = 'agent-form';
+
+    var nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.value = initial.name || '';
+    form.appendChild(labeled(textLabel(ai18n.agentName), nameInput));
+
+    var taskInput = document.createElement('textarea');
+    taskInput.rows = 6;
+    taskInput.value = initial.task || '';
+    form.appendChild(labeled(textLabel(ai18n.agentTask), taskInput));
+
+    var taskHint = document.createElement('p');
+    taskHint.className = 'agent-form-hint';
+    taskHint.textContent = ai18n.agentTaskHint + ' ';
+    var samplesLink = document.createElement('a');
+    samplesLink.className = 'agent-form-samples-link';
+    samplesLink.href = '#';
+    samplesLink.textContent = ai18n.samplesLink;
+    taskHint.appendChild(samplesLink);
+    form.appendChild(taskHint);
+
+    // Read-only samples, so a user knows what a task looks like.
+    var examples = document.createElement('div');
+    examples.className = 'agent-form-examples';
+    examples.hidden = true;
+    [[ai18n.sample1Title, ai18n.sample1], [ai18n.sample2Title, ai18n.sample2]].forEach(function (pair) {
+      if (!pair[1]) return;
+      var item = document.createElement('div');
+      item.className = 'agent-form-example';
+      var itemTitle = document.createElement('span');
+      itemTitle.className = 'agent-form-example-title';
+      itemTitle.textContent = pair[0];
+      item.appendChild(itemTitle);
+      var itemText = document.createElement('span');
+      itemText.textContent = pair[1];
+      item.appendChild(itemText);
+      examples.appendChild(item);
+    });
+    if (ai18n.deliveryHint) {
+      var delivery = document.createElement('span');
+      delivery.className = 'agent-form-examples-note';
+      delivery.textContent = ai18n.deliveryHint;
+      examples.appendChild(delivery);
+    }
+    form.appendChild(examples);
+
+    samplesLink.addEventListener('click', function (e) {
+      e.preventDefault();
+      examples.hidden = !examples.hidden;
+      samplesLink.textContent = examples.hidden ? ai18n.samplesLink : ai18n.samplesHide;
+    });
+
+    // Blank unless MCP servers are configured — those are the notify channels.
+    if (ai18n.notifyChannels) {
+      var notifyHint = document.createElement('p');
+      notifyHint.className = 'agent-form-hint';
+      notifyHint.textContent = ai18n.notifyChannels;
+      form.appendChild(notifyHint);
+    }
+
+    var schedLabel = document.createElement('div');
+    schedLabel.className = 'agent-form-section-label';
+    schedLabel.textContent = ai18n.agentSchedule;
+    form.appendChild(schedLabel);
+
+    var schedFields = document.createElement('div');
+    schedFields.className = 'agent-sched-fields';
+
+    // 'once' is no schedule at all — the agent is run from its Run now button.
+    var freqSelect = document.createElement('select');
+    freqSelect.className = 'multi-row';
+    [['once', ai18n.freqOnce], ['hourly', ai18n.freqHourly], ['daily', ai18n.freqDaily], ['weekdays', ai18n.freqWeekdays], ['weekly', ai18n.freqWeekly], ['monthly', ai18n.freqMonthly]]
+      .forEach(function (pair) {
+        var opt = document.createElement('option');
+        opt.value = pair[0];
+        opt.textContent = pair[1];
+        if (sched.frequency === pair[0]) opt.selected = true;
+        freqSelect.appendChild(opt);
+      });
+    schedFields.appendChild(labeled(textLabel(ai18n.freqLabel), freqSelect));
+
+    // "Every N hours at minute M". Only 24's divisors are offered: a step like
+    // */5 would leave a short gap at midnight instead of an even interval.
+    var everySelect = document.createElement('select');
+    everySelect.className = 'multi-row';
+    [1, 2, 3, 4, 6, 8, 12].forEach(function (n) {
+      var opt = document.createElement('option');
+      opt.value = String(n);
+      opt.textContent = String(n);
+      if (String(sched.every) === String(n)) opt.selected = true;
+      everySelect.appendChild(opt);
+    });
+
+    var minuteSelect = document.createElement('select');
+    minuteSelect.className = 'multi-row';
+    for (var m = 0; m < 60; m += 5) {
+      var mOpt = document.createElement('option');
+      mOpt.value = String(m);
+      mOpt.textContent = (m < 10 ? '0' : '') + m;
+      if (String(sched.minute) === String(m)) mOpt.selected = true;
+      minuteSelect.appendChild(mOpt);
+    }
+
+    var intervalFields = document.createElement('div');
+    intervalFields.className = 'agent-interval-fields';
+    var hoursText = document.createElement('span');
+    hoursText.textContent = ai18n.hoursLabel;
+    intervalFields.appendChild(everySelect);
+    intervalFields.appendChild(hoursText);
+    intervalFields.appendChild(minuteSelect);
+    var intervalRow = labeled(textLabel(ai18n.everyLabel), intervalFields);
+    schedFields.appendChild(intervalRow);
+
+    var timeInput = document.createElement('input');
+    timeInput.type = 'time';
+    timeInput.value = sched.time;
+    var timeRow = labeled(textLabel(ai18n.timeLabel), timeInput);
+    // The zone is never asked for, so say which one the time is read in.
+    if (sched.timezone) {
+      var tzHint = document.createElement('p');
+      tzHint.className = 'agent-form-hint';
+      tzHint.textContent = ai18n.timezone + ': ' + sched.timezone;
+      timeRow.appendChild(tzHint);
+    }
+    schedFields.appendChild(timeRow);
+
+    var weekdaySelect = document.createElement('select');
+    weekdaySelect.className = 'multi-row';
+    // date.day_names is 0-indexed from Sunday, same as cron's day-of-week.
+    ai18n.dayNames.forEach(function (d, i) {
+      var opt = document.createElement('option');
+      opt.value = i;
+      opt.textContent = d;
+      if (String(sched.weekday) === String(i)) opt.selected = true;
+      weekdaySelect.appendChild(opt);
+    });
+    var weekdayRow = labeled(textLabel(ai18n.weekdayLabel), weekdaySelect);
+    schedFields.appendChild(weekdayRow);
+
+    // 1-28 plus "L" (fugit's last-day-of-month), so a day that some months
+    // don't have can't be picked at all.
+    var daySelect = document.createElement('select');
+    daySelect.className = 'multi-row';
+    var dayOptions = [];
+    for (var dnum = 1; dnum <= 31; dnum++) dayOptions.push([String(dnum), String(dnum)]);
+
+    dayOptions.forEach(function (pair) {
+      var opt = document.createElement('option');
+      opt.value = pair[0];
+      opt.textContent = pair[1];
+      if (String(sched.day) === pair[0]) opt.selected = true;
+      daySelect.appendChild(opt);
+    });
+    var dayRow = labeled(textLabel(ai18n.dayLabel), daySelect);
+
+    var dayHint = document.createElement('p');
+    dayHint.className = 'agent-form-hint';
+    dayHint.textContent = ai18n.dayWarning;
+    dayRow.appendChild(dayHint);
+
+    function syncDayHint() {
+      dayHint.hidden = !/^(29|30|31)$/.test(daySelect.value);
+    }
+    daySelect.addEventListener('change', syncDayHint);
+    syncDayHint();
+
+    schedFields.appendChild(dayRow);
+
+    form.appendChild(schedFields);
+
+    function syncSchedVisibility() {
+      // Hourly sets its own minute, and its hour is the interval — no time of day.
+      intervalRow.hidden = freqSelect.value !== 'hourly';
+      timeRow.hidden = freqSelect.value === 'once' || freqSelect.value === 'hourly';
+      weekdayRow.hidden = freqSelect.value !== 'weekly';
+      dayRow.hidden = freqSelect.value !== 'monthly';
+    }
+    freqSelect.addEventListener('change', syncSchedVisibility);
+    syncSchedVisibility();
+
+    // No delivery channels here any more: whatever the agent should send goes
+    // out as an MCP tool call its task asks for.
+    box.appendChild(form);
+
+    var errorMsg = document.createElement('div');
+    errorMsg.className = 'agent-form-error';
+    box.appendChild(errorMsg);
+
+    var actions = document.createElement('div');
+    actions.className = 'agent-form-actions';
+
+    var cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = ai18n.cancel;
+    cancelBtn.addEventListener('click', closeAgentForm);
+
+    var saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'primary';
+    saveBtn.textContent = ai18n.save;
+    saveBtn.addEventListener('click', function () {
+      var name = nameInput.value.trim();
+      var task = taskInput.value.trim();
+      errorMsg.textContent = '';
+      if (!name) { errorMsg.textContent = ai18n.errNameBlank; return; }
+      if (!task) { errorMsg.textContent = ai18n.errTaskBlank; return; }
+      var needsTime = freqSelect.value !== 'once' && freqSelect.value !== 'hourly';
+      if (needsTime && !timeInput.value) { errorMsg.textContent = ai18n.errSchedule; return; }
+
+      var payload = {
+        name: name,
+        task: task
+      };
+      payload.frequency = freqSelect.value;
+      if (freqSelect.value === 'hourly') {
+        payload.every = everySelect.value;
+        payload.minute = minuteSelect.value;
+      } else if (freqSelect.value !== 'once') {
+        payload.time = timeInput.value;
+        payload.weekday = weekdaySelect.value;
+        payload.day = daySelect.value;
+      }
+
+      saveBtn.disabled = true;
+      errorMsg.textContent = ai18n.saving;
+      var url = isEdit ? (customAgentsUrl + '/' + initial.key) : customAgentsUrl;
+      var method = isEdit ? 'PATCH' : 'POST';
+      fetch(url, { method: method, headers: jsonHeaders(), body: JSON.stringify(payload) })
+        .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+        .then(function (res) {
+          saveBtn.disabled = false;
+          if (!res.ok || res.data.error) {
+            errorMsg.textContent = (res.data && res.data.error) || ai18n.saveFailed;
+            return;
+          }
+          errorMsg.textContent = '';
+          closeAgentForm();
+          applyAgentMenuEntry(res.data.menu);
+          // The header carries the agent's name on its own page.
+          var heading = document.querySelector('#agent-chat-header h2');
+          if (heading && res.data.agent && res.data.agent.key === currentAgentKey) {
+            heading.textContent = res.data.agent.name;
+          }
+        })
+        .catch(function () {
+          saveBtn.disabled = false;
+          errorMsg.textContent = ai18n.saveFailed;
+        });
+    });
+
+    actions.appendChild(cancelBtn);
+    actions.appendChild(saveBtn);
+    box.appendChild(actions);
+
+    modal.appendChild(box);
+    modal.hidden = false;
+  }
+
+  if (addAgentBtn) addAgentBtn.addEventListener('click', function () { openAgentForm(null); });
+
+  decorateAgentMenuRows();
 });

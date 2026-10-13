@@ -1,21 +1,22 @@
 en:
   label_redmine_agent: Redmine Agent
+  label_agent_top_menu: AI
   label_redmine_agent_placeholder: Ask something...
-  label_redmine_agent_greeting: Hi! How can I help you today?
   label_redmine_agent_welcome_title: Welcome to Redmine Agent
   label_redmine_agent_welcome_text: I can help you manage projects, issues, time entries, users, and files in your Redmine workspace. Type your question below to get started.
+  label_agent_runs_empty_title: No runs yet
+  label_agent_runs_empty_text: This agent's runs will appear here, newest at the bottom.
   label_redmine_agent_name: Name
   label_redmine_agent_model: LLM Model
-  label_agent_query: Query Agent
-  label_agent: Agent
   label_agent_recents: Recents
-  label_agent_no_chats: No conversations yet
   label_agent_new_chat: New chat
   label_agent_delete_chat: Delete chat
   label_agent_send: Send
   label_agent_history_load_error: Unable to load history.
   label_agent_delete_confirm: Are you sure you want to delete this chat?
   label_agent_delete_error: Unable to delete this chat.
+  label_agent_clear_chat: Clear chat
+  label_agent_clear_confirm: "Clear this agent's whole chat history? This cannot be undone."
   label_agent_unreachable: Unable to reach the AI agent.
   label_agent_mcp_unreachable: "Could not reach the MCP server at %{url}. Please check the host name"
   label_agent_mcp_tools_failed: "Connected to the MCP server, but could not load its tools."
@@ -34,16 +35,127 @@ en:
   label_redmine_agent_model_hint: "Note: For multiple models, use commas.\nFor eg. claude-sonnet-5, claude-opus-5, qwen/qwen3.6-27b, gemini-3.6-flash"
   label_redmine_agent_duplicate: An agent with this name already exists.
   label_redmine_agent_select_row: Please select an LLM from the list.
-  label_redmine_agent_mcp_status: MCP Plugin
+  label_redmine_agent_mcp_status: Redmine MCP Plugin
   label_installed: Installed
   label_not_installed: Not Installed
   error_agent_no_model_config: "No model is configured. Please add a model in the plugin settings."
   error_agent_rest_api_disabled: "The REST web service is disabled. Please enable it in Administration → Settings → Integrations."
-  label_redmine_agent_hitl: "Human in the loop for  Create / Update actions"
+  label_redmine_agent_hitl: "Human in the loop"
   label_redmine_agent_hitl_hint: "Note: When enabled, Requires approval for DB operations."
+  label_agent_add_agent_group: "Add Agent — Group"
+  label_agent_add_agent_group_hint: "Members of any of these groups may create custom agents."
   label_agent_approval_approve: Approve
   label_agent_approval_reject: Reject
   label_agent_approval_prompt: "Please review this action and approve or reject it."
   label_agent_action_cancelled: "Cancelled — the action was not carried out. Let me know if you'd like to change anything and try again."
   label_agent_no_reply: "Sorry, I could not complete that request. Please try rephrasing it."
   label_agent_tool_unavailable: "I can't do that here — the %{action} action isn't available."
+  label_agent_attach_file: Attach file
+  label_agent_remove_file: Remove attached file
+  label_agent_attachment_settings: Attachments
+  label_agent_attachment_max_count: Maximum files per message
+  label_agent_attachment_max_total_size: Maximum total size (MB)
+  label_agent_attachment_max_count_hint: Maximum number of files allowed in one message.
+  label_agent_attachment_max_total_size_hint: Combined size allowed for all files in one message.
+  error_agent_attachments_too_many: You can attach up to %{count} files at once.
+  error_agent_attachments_too_large: The combined attachment size must be %{size} or smaller.
+
+  # Custom agents
+  label_agent_add_agent: Add agent
+  label_agent_edit_agent: Edit agent
+  label_agent_delete_agent: Delete agent
+  label_agent_agent_name: Name
+  label_agent_agent_task: Task / instructions
+  label_agent_agent_task_hint: "What should this agent do? This becomes its instructions."
+  label_agent_task_samples_link: "See sample prompts"
+  label_agent_task_samples_hide: "Hide sample prompts"
+  label_agent_task_sample_1_title: "Clock-in check → Slack"
+  label_agent_task_sample_1: "Every weekday at 10 am, list the employees who have not clocked in yet and post the list to the #employees Slack channel."
+  label_agent_task_sample_2_title: "Timesheet reminder → Email"
+  label_agent_task_sample_2: "Every Friday at 6 pm, find the users who have not submitted their timesheet for this week and email each of them a reminder."
+  label_agent_task_delivery_hint: "Mention the delivery in the instruction too — where the result should go (a Slack channel, a Slack DM, or email)."
+  label_agent_notify_channels: "Notification channels available: %{channels}"
+  label_agent_agent_schedule: Schedule
+  label_agent_schedule_frequency: Frequency
+  label_agent_schedule_once: Run once
+  label_agent_schedule_hourly: Hourly
+  label_agent_schedule_every: Every
+  label_agent_schedule_hours: hours at minute
+  label_agent_schedule_daily: Daily
+  label_agent_schedule_weekdays: Weekdays
+  label_agent_schedule_weekly: Weekly
+  label_agent_schedule_monthly: Monthly
+  label_agent_schedule_time: Time
+  label_agent_schedule_weekday: Day of week
+  label_agent_schedule_day: Day of month
+  label_agent_schedule_last_day: Last day of month
+  label_agent_schedule_day_warning: "Not every month has this day, so those months are skipped."
+  label_agent_schedule_timezone: Timezone
+  label_agent_save: Save
+  label_agent_saving: "Saving..."
+  label_agent_save_failed: Could not save.
+  label_agent_delete_agent_confirm: "Delete this agent? Its chat history will be removed too."
+  label_agent_run_now: Run now
+  label_agent_run_failed: Run failed
+  label_agent_running: "Running..."
+  label_agent_mcp_servers: MCP Servers
+  label_agent_mcp_server_url: Server URL
+  label_agent_mcp_token: Token
+  label_agent_mcp_connection: Connection
+  label_agent_mcp_test: Test connection
+  label_agent_mcp_testing: "Connecting..."
+  label_agent_mcp_test_fail: Could not connect to the MCP server.
+  label_agent_mcp_tools_found: "%{count} tools available."
+  label_agent_mcp_builtin_name: Redmine
+  label_agent_mcp_builtin_suffix: default
+  label_agent_mcp_servers_hint: "Note: You can configure your popular MCP servers here (Slack, Gmail, GitHub, etc.)"
+  label_agent_mcp_builtin_readonly: "Built-in server — it cannot be changed, and it signs in with your own Redmine API key."
+  label_agent_mcp_builtin_locked: The built-in server cannot be changed.
+  error_agent_name_blank: Please enter a name.
+  error_agent_task_blank: Please enter a task.
+  error_agent_run_not_started: "The task is already running or could not be started. Wait for the current run to finish before using Run Now again."
+  error_agent_name_taken: An agent with this name already exists.
+  error_agent_invalid_schedule: Please enter a valid schedule time.
+  error_agent_unknown: Unknown agent.
+  error_agent_not_allowed: Only the user who created this agent can manage it.
+  error_agent_add_not_allowed: You are not allowed to add agents.
+
+  # Group permission tab: the fieldset legend, then the permission's own name as its key.
+  label_ai: AI
+  ADD AGENT: Add Agent
+
+  label_redmine_agent_greeting: Hi! How can I help you today?
+  label_agent: Agent
+  label_agent_no_chats: No conversations yet
+  label_agent_chat: Chat
+  label_agent_header_title: Agents
+  label_agent_no_agents: No agents found
+  label_agent_search: Search agents
+  label_agent_scheduled: Scheduled
+  label_agent_every_n_hours: "Every %{count} hours"
+  label_agent_every_n_hours_at: "Every %{count} hours at :%{minute}"
+  label_agent_hourly_at: "Hourly at :%{minute}"
+  label_agent_weekdays_at: "Weekdays at %{time}"
+  label_agent_monthly_on_day: "Monthly on day %{day} at %{time}"
+  label_agent_weekly_at: "Every %{weekday} at %{time}"
+  label_agent_daily_at: "Daily at %{time}"
+  label_agent_sunday: Sunday
+  label_agent_monday: Monday
+  label_agent_tuesday: Tuesday
+  label_agent_wednesday: Wednesday
+  label_agent_thursday: Thursday
+  label_agent_friday: Friday
+  label_agent_saturday: Saturday
+  label_agent_cannot_run: This agent cannot be run manually
+  label_agent_cannot_delete: This agent cannot be deleted
+  label_agent_history_cleared: History cleared
+  label_agent_saved: "Agent %{name} saved"
+  label_agent_started: "%{name} started"
+  label_agent_deleted: "%{name} deleted"
+  label_agent_copied: Copied
+  label_agent_schedule_date: Date
+  error_agent_date_past: The chosen date has already passed
+  error_agent_datetime_past: Pick a time in the future
+  
+  label_custom_agent_access: Custom Agent Access
+  text_agent_creation_group_hint: "Only members of this group can create and manage custom agents."

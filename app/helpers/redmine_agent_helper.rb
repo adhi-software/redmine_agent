@@ -21,15 +21,44 @@ module RedmineAgentHelper
     table thead tbody tr th td h1 h2 h3 h4 h5 h6 blockquote hr
   ].freeze
   ALLOWED_HTML_ATTRS = { 'a' => %w[href title] }.freeze
+  # The history panel's window; a page asks for the few it actually renders.
+  MAX_CHATS = 500
+
+  def agent_attachment_max_count
+    agent_attachment_setting('attachment_max_count')
+  end
+
+  def agent_attachment_max_total_size
+    agent_attachment_setting('attachment_max_total_size_mb').megabytes
+  end
+
+  def can_add_agent?
+    group_ids = Array(Setting.plugin_redmine_agent['add_agent_group_id']).map(&:to_s).reject(&:blank?)
+    return false if group_ids.empty?
+
+    User.current.groups.where(id: group_ids).exists?
+  end
+
+  def agent_attachment_setting(key)
+    defaults = Redmine::Plugin.find(:redmine_agent).settings[:default]
+    value = Setting.plugin_redmine_agent[key].presence || defaults[key]
+    value.to_i.positive? ? value.to_i : defaults[key].to_i
+  end
+  private :agent_attachment_setting
 
   def render_markdown(text)
     text = text.to_s
     text = text.encode(Encoding::UTF_8) unless text.encoding == Encoding::UTF_8
 
-    html = Commonmarker.to_html(text, options: {
-      render:    { unsafe: false, hardbreaks: false },
-      extension: { table: true, autolink: true, strikethrough: true, tagfilter: true }
-    })
+    # Commonmarker's default Rust syntax highlighter (syntect) segfaults the
+    # whole process on this platform whenever a reply contains a fenced code
+    # block. Disabling it loses nothing: Sanitize strips highlight markup anyway.
+    html = Commonmarker.to_html(text,
+      options: {
+        render:    { unsafe: false, hardbreaks: false },
+        extension: { table: true, autolink: true, strikethrough: true, tagfilter: true }
+      },
+      plugins: { syntax_highlighter: nil })
     Sanitize.fragment(html,
       elements:       ALLOWED_HTML_TAGS,
       attributes:     ALLOWED_HTML_ATTRS,
@@ -47,15 +76,22 @@ module RedmineAgentHelper
   # Convert the model's markdown reply into sanitized HTML for the web, plus
   # normalized markdown for clients that render it themselves (the mobile app).
   def parse_structured_reply(raw)
-    cleaned = normalize_markdown(raw)
+    text    = raw.to_s
+    cleaned = normalize_markdown(text)
 
-    { reply: raw.strip, type: 'html', html: render_markdown(cleaned), markdown: cleaned }
+    { reply: text.strip, type: 'html', html: render_markdown(cleaned),
+      markdown: cleaned }
   end
 
-  def user_chats(user)
+  # Ordering before the limit is what makes which chats come back
+  # deterministic; an empty one must not use up the window either.
+  def user_chats(user, ai_agent = nil, limit: MAX_CHATS)
     chats = AiAgentChat.for_user(user)
-                       .includes(:ai_chat_messages)
-                       .limit(500)
+                       .where(id: AiChatMessage.select(:chat_id))
+                       .recent_first
+                       .includes(ai_chat_messages: :attachments)
+                       .limit(limit)
+    chats = chats.for_agent(ai_agent) if ai_agent
 
     result = chats.filter_map do |chat|
       rows = chat.ai_chat_messages.sort_by { |m| [m.created_at, m.id] }
@@ -68,6 +104,7 @@ module RedmineAgentHelper
         exchanges:  rows.map { |d|
           cleaned = normalize_markdown(d.response)
           { request: d.request, reply: d.response.to_s,
+            attachments: present_chat_attachments(d.attachments),
             html: render_markdown(cleaned), markdown: cleaned }
         }
       }
@@ -77,12 +114,15 @@ module RedmineAgentHelper
   end
 
   # Find the current user's chat by id, or start a new one. The
-  # first message becomes the chat's subject.
-  def find_or_create_chat(chat_id, message)
+  # first message becomes the chat's subject. Scoping the lookup by agent too
+  # means a chat_id from another agent can never be resumed under this one —
+  # it just starts a fresh chat here instead.
+  def find_or_create_chat(chat_id, message, ai_agent)
     cid = chat_id.to_s.presence
-    chat = (cid && cid.match?(/\A\d+\z/)) && AiAgentChat.for_user(User.current).find_by(id: cid)
+    chat = (cid && cid.match?(/\A\d+\z/)) &&
+           AiAgentChat.for_user(User.current).for_agent(ai_agent).find_by(id: cid)
     chat || AiAgentChat.create!(
-      ai_agent: default_agent,
+      ai_agent: ai_agent,
       user:     User.current,
       subject:  message.to_s.truncate(255)
     )
@@ -101,21 +141,37 @@ module RedmineAgentHelper
     nil
   end
 
-  # Named from the menu caption, forced to :en so the row is looked up under one
-  # stable name whatever language the user browses in. Looked up
-  # case-insensitively so the row is found whatever the database's collation.
-  # The retry covers the unique-index race between the lookup and the insert
-  # (two concurrent first requests).
-  def default_agent
-    name = I18n.t(:label_agent_query, locale: :en)
-    AiAgent.named(name).first ||
-      AiAgent.create!(name: name, description: 'Default Redmine chat agent')
-  rescue ActiveRecord::RecordNotUnique
-    AiAgent.named(name).first
+  def present_chat_attachments(attachments)
+    Array(attachments).map do |attachment|
+      {
+        id: attachment.id, filename: attachment.filename,
+        content_type: attachment.content_type, image: attachment.image?,
+        url: (redmine_agent_attachment_path(attachment, attachment.filename) if attachment.image?)
+      }
+    end
   end
 
-  def mcp_server_url
-    "#{Setting.protocol}://#{Setting.host_name}".chomp('/') + '/mcp'
+  # Every MCP server the chat can reach: the built-in Redmine one, plus the
+  # rows configured in the plugin settings (Slack, Teams, ...).
+  def mcp_servers
+    servers = []
+    if mcp_installed?
+      servers << { name: 'redmine', builtin: true,
+                   url: RedmineAgent::AppUrl.base + '/mcp',
+                   token: User.current.try(:api_key).to_s }
+    end
+    servers + configured_mcp_servers
+  end
+
+  # Settings rows are pipe-encoded as name|url|token|connected.
+  def configured_mcp_servers
+    Array(Setting.plugin_redmine_agent['mcp_servers']).reject(&:blank?).filter_map do |row|
+      name, url, token = row.to_s.split('|', 4)
+      next if url.to_s.strip.blank?
+
+      { name: name.to_s.strip.presence || 'mcp', builtin: false,
+        url: url.to_s.strip, token: token.to_s.strip }
+    end
   end
 
   def agent_model_configured?
@@ -131,5 +187,9 @@ module RedmineAgentHelper
     errors << I18n.t(:error_agent_no_model_config) unless agent_model_configured?
     errors << I18n.t(:error_agent_rest_api_disabled) if mcp_installed? && !Setting.rest_api_enabled?
     errors
+  end
+
+  def agent_group_options
+    Group.sorted.pluck(:lastname, :id)
   end
 end

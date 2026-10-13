@@ -4,25 +4,37 @@
    ═════════════════════════════════════════════════════════════════════════════ */
 
 /* ── Page container ── */
+/* Fills #content instead of guessing the chrome height with a vh calc.
+   No min-height: #wrapper clips, so a floor would cut off the input. */
 #redmine-agent-page {
   display: flex;
-  height: calc(100vh - 135px);
-  min-height: 480px;
+  flex: 1 1 auto;
+  height: auto;
   background: #f4f6f9;
   border-radius: 0;
   overflow: hidden;
-  margin: -10px -10px -14px -10px;
+  /* No negative bottom margin: it slid "Powered by" under the Redmine footer. */
+  margin: -10px -10px 0 -10px;
 }
 
 /* Override Redmine layout when AI Agent page is rendered */
 .controller-redmine_agent.action-index #content {
+  display: flex;
+  flex-direction: column;
   padding: 0 !important;
   margin: 0 !important;
   overflow: hidden;
   border: none !important;
 }
 
+/* The chat column only scrolls internally if every ancestor has a definite
+   height — #wrapper is min-height only, and #main won't shrink below content. */
+.controller-redmine_agent.action-index #wrapper {
+  height: 100vh;
+}
+
 .controller-redmine_agent.action-index #main {
+  min-height: 0;
   padding: 0 !important;
 }
 
@@ -51,18 +63,26 @@ html:has(.agent-config-error) #main.sidebar {
   width: 100% !important;
 }
 
-/* "Powered by <model>" in normal flow under the chat input — same 24px side
+/* "Powered by <model>" in normal flow under the chat input — same column
    padding as the form, so it lines up with the input's right edge. Not fixed:
    the panel is overflow:hidden and the sidebar ancestor is transformed, which
    clips a fixed child instead of pinning it to the window. */
 #agent-powered-by {
-  margin-top: -8px;
-  padding: 0 24px 12px;
-  background: #fff;
+  margin: 6px 0 0;
+  padding: 0 max(24px, calc((100% - var(--agent-column)) / 2)) 12px;
+  background: transparent;
   font-size: 1em;
   color: #666;
   text-align: right;
   word-break: break-word;
+}
+
+/* Scheduled agent page: no composer above, so take the form's border/spacing. */
+#agent-chat-messages + #agent-powered-by {
+  margin-top: 0;
+  padding-top: 12px;
+  background: #fff;
+  border-top: 1px solid #e0e4e8;
 }
 
 #agent-powered-by .agent-model-name {
@@ -79,8 +99,10 @@ html:has(.agent-config-error) #main.sidebar {
   flex: 1;
   display: flex;
   flex-direction: column;
-  background: #fff;
+  background: #f8f9fb;
   min-width: 0;
+  /* Width of the messages/composer column — the one knob for the whole page. */
+  --agent-column: 1000px;
 }
 
 /* Chat header */
@@ -99,17 +121,12 @@ html:has(.agent-config-error) #main.sidebar {
   gap: 12px;
 }
 
-.chat-header-info h2 {
+/* Matches a module page title (#content h2); id-scoped so margin:0 wins. */
+#agent-chat-header .chat-header-info h2 {
   margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-  color: #333;
-}
-
-.chat-header-info .chat-subtitle {
-  font-size: 12px;
-  color: #888;
-  margin-top: 1px;
+  font-size: 24px;
+  font-weight: 700;
+  color: #172b4d;
 }
 
 .chat-header-actions {
@@ -142,6 +159,56 @@ html:has(.agent-config-error) #main.sidebar {
   background: #eaf1fc;
   color: #2e6bc4;
   border-color: #3b7ddd;
+}
+
+.agent-run-label {
+  display: none;
+}
+
+/* Run Now is asynchronous. Replace its play icon with a spinner and expose a
+   persistent label while the browser waits for the completed run. */
+#agent-run-agent.agent-run-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  opacity: 1;
+  color: #3b7ddd;
+  background: #eaf1fc;
+  border-color: #3b7ddd;
+}
+
+#agent-run-agent.agent-run-pending svg {
+  display: none;
+}
+
+#agent-run-agent.agent-run-pending::before,
+.agent-row-actions .act-run.agent-run-pending::before {
+  content: "";
+  width: 14px;
+  height: 14px;
+  box-sizing: border-box;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  background: none;
+  -webkit-mask-image: none;
+  mask-image: none;
+  animation: agent-run-spin 0.75s linear infinite;
+}
+
+#agent-run-agent.agent-run-pending .agent-run-label {
+  display: inline;
+}
+
+@keyframes agent-run-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #agent-run-agent.agent-run-pending::before,
+  .agent-row-actions .act-run.agent-run-pending::before {
+    animation-duration: 1.5s;
+  }
 }
 
 .chat-header-actions button.danger {
@@ -296,13 +363,83 @@ html:has(.agent-config-error) #main.sidebar {
   margin-top: 2px;
 }
 
+/* One block per conversation. A scheduled agent's page stacks every run, so
+   each block opens with a dated rule carrying that run's delete. */
+.agent-chat-block + .agent-chat-block {
+  margin-top: 4px;
+}
+
+.agent-run-sep {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  font-size: 11px;
+  color: #99a;
+}
+
+.agent-run-sep::before {
+  content: '';
+  width: 20px;
+  border-top: 1px solid #e0e4e8;
+}
+
+/* The rule rides on the label so it fills the rest of the row. */
+.agent-run-sep-label {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.agent-run-sep-label::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid #e0e4e8;
+}
+
+/* A run that failed has no reply to show, so the reason takes that place. */
+.agent-run-error {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-left: 3px solid #c0392b;
+  background: #fff5f5;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #c0392b;
+}
+
 /* Messages area */
+/* Same 760px centred column as the composer, so replies line up with the input
+   box at every width; max() keeps a 24px gutter once the screen is narrower. */
 #agent-chat-messages {
   flex: 1;
   overflow-y: auto;
-  padding: 24px;
+  padding: 24px max(24px, calc((100% - var(--agent-column)) / 2));
   scroll-behavior: smooth;
   background: #f8f9fb;
+  /* Stable gutter: the column must not shift when the scrollbar appears. */
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: #c1c8d1 transparent;
+}
+
+#agent-chat-messages::-webkit-scrollbar {
+  width: 8px;
+}
+
+#agent-chat-messages::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#agent-chat-messages::-webkit-scrollbar-thumb {
+  background: #c1c8d1;
+  border-radius: 4px;
+}
+
+#agent-chat-messages::-webkit-scrollbar-thumb:hover {
+  background: #a8b0bb;
 }
 
 /* Welcome card */
@@ -342,7 +479,7 @@ html:has(.agent-config-error) #main.sidebar {
 /* Chat messages */
 .redmine-agent-msg {
   margin-bottom: 12px;
-  max-width: 75%;
+  max-width: 100%;
   padding: 10px 14px;
   border-radius: 10px;
   font-size: 14px;
@@ -366,6 +503,7 @@ html:has(.agent-config-error) #main.sidebar {
 .redmine-agent-msg.user {
   margin-left: auto;
   width: fit-content;
+  max-width: 80%;
   background: #3b7ddd;
   color: #fff;
   border-bottom-right-radius: 4px;
@@ -374,10 +512,11 @@ html:has(.agent-config-error) #main.sidebar {
 
 .redmine-agent-msg.agent {
   margin-right: auto;
-  background: #fff;
+  max-width: 100%;
+  padding: 2px 0;
+  background: transparent;
   color: #333;
-  border: 1px solid #e0e4e8;
-  border-bottom-left-radius: 4px;
+  border: none;
 }
 
 /* ═════════════════════════════════════════════════════════════════════════════
@@ -480,7 +619,7 @@ html:has(.agent-config-error) #main.sidebar {
   display: flex;
   align-items: center;
   gap: 5px;
-  padding: 14px 18px;
+  padding: 10px 0;
 }
 
 .redmine-agent-msg.loading .dot {
@@ -514,18 +653,23 @@ html:has(.agent-config-error) #main.sidebar {
 
 /* ── Chat input form ── */
 #agent-chat-form {
-  padding: 14px 24px 18px;
-  border-top: 1px solid #e0e4e8;
-  background: #fff;
+  margin: 0;
+  padding: 12px max(24px, calc((100% - var(--agent-column)) / 2)) 0;
+  background: transparent;
+}
+
+#agent-chat-form:last-child {
+  padding-bottom: 18px;
 }
 
 .chat-input-wrapper {
   display: flex;
   align-items: flex-end;
-  background: #f4f6f9;
-  border: 1px solid #d0d5dc;
-  border-radius: 8px;
-  padding: 4px 4px 4px 14px;
+  background: #fff;
+  border: 1px solid #d9dee5;
+  border-radius: 26px;
+  padding: 6px 6px 6px 20px;
+  box-shadow: 0 2px 14px rgba(23, 43, 77, 0.10);
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
@@ -534,14 +678,179 @@ html:has(.agent-config-error) #main.sidebar {
   box-shadow: 0 0 0 2px rgba(59, 125, 221, 0.15);
 }
 
+.chat-input-wrapper.agent-chat-drop-active {
+  border-color: #3b7ddd;
+  background: #eaf1fc;
+  box-shadow: 0 0 0 2px rgba(59, 125, 221, .2);
+}
+
+.agent-chat-attach {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 36px;
+  border: none;
+  padding: 0;
+  background: transparent;
+  color: #667;
+  cursor: pointer;
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+.agent-chat-attach:hover:not(:disabled) {
+  color: #3b7ddd;
+}
+
+.agent-chat-attach:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+#agent-chat-attachment-preview {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 7px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: #eaf1fc;
+  color: #315f9e;
+  font-size: 12px;
+}
+
+.agent-chat-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 260px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, .55);
+}
+
+.agent-chat-attachment-thumbnail {
+  width: 36px;
+  height: 36px;
+  border-radius: 3px;
+  object-fit: cover;
+  flex: 0 0 auto;
+  cursor: zoom-in;
+}
+
+.agent-chat-attachment-chip.image-expanded {
+  flex-basis: 100%;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+.agent-chat-attachment-thumbnail.expanded {
+  width: min(480px, 80vw);
+  height: auto;
+  max-height: 320px;
+  object-fit: contain;
+  cursor: zoom-out;
+}
+
+.agent-chat-attachment-chip > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-chat-attachment-chip button {
+  border: none;
+  padding: 0 2px;
+  background: transparent;
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.agent-chat-attachment-error {
+  flex-basis: 100%;
+  color: #c62828;
+  font-size: 12px;
+}
+
+.agent-chat-message-image {
+  display: block;
+  max-width: min(360px, 100%);
+  max-height: 280px;
+  margin-top: 8px;
+  border-radius: 6px;
+  object-fit: contain;
+  cursor: zoom-in;
+}
+
+.agent-image-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, .45);
+}
+
+.agent-image-viewer-panel {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 760px;
+  max-height: 75vh;
+  padding: 12px;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, .35);
+}
+
+.agent-image-viewer img {
+  max-width: 100%;
+  max-height: calc(75vh - 24px);
+  object-fit: contain;
+  border-radius: 6px;
+}
+
+.agent-image-viewer-close {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 50%;
+  padding: 0;
+  box-sizing: border-box;
+  background: rgba(0, 0, 0, .55);
+  color: #fff;
+  font-size: 24px;
+  font-family: Arial, sans-serif;
+  font-weight: 400;
+  line-height: 1;
+  text-align: center;
+  cursor: pointer;
+}
+
 #agent-chat-input {
   flex: 1;
   border: none;
   background: transparent;
   outline: none;
-  font-size: 14px;
+  font-size: 15px;
   color: #333;
-  padding: 10px 0;
+  padding: 12px 0;
   font-family: inherit;
   resize: none;
   line-height: 1.4;
@@ -557,9 +866,9 @@ html:has(.agent-config-error) #main.sidebar {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 6px;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
   border: none;
   background: #3b7ddd;
   color: #fff;
@@ -585,14 +894,35 @@ html:has(.agent-config-error) #main.sidebar {
   display: block;
 }
 
+/* ── New chat: composer centered in the area, like Claude/ChatGPT ──
+   Auto margins above the messages and below the composer split the free space,
+   so the welcome card and the input float together in the middle. The class is
+   set only while the chat is empty (redmine_agent.js). */
+#agent-chat-area.agent-chat-empty #agent-chat-messages {
+  flex: 0 1 auto;
+  margin-top: auto;
+  background: #fff;
+}
+
+#agent-chat-area.agent-chat-empty {
+  background: #fff;
+}
+
+/* Whichever of the two is last carries the bottom half of the free space. */
+#agent-chat-area.agent-chat-empty #agent-chat-form:last-child,
+#agent-chat-area.agent-chat-empty #agent-powered-by {
+  margin-bottom: auto;
+}
+
 /* ═════════════════════════════════════════════════════════════════════════════
    HITL APPROVAL UI
    ═════════════════════════════════════════════════════════════════════════════ */
 
 /* Approval-pending message gets a distinct left border */
 .redmine-agent-msg.agent.approval-pending {
+  padding-left: 12px;
   border-left: 3px solid #f0ad4e;
-  max-width: 85%;
+  max-width: 100%;
 }
 
 /* Action buttons row */
@@ -676,17 +1006,322 @@ html:has(.agent-config-error) #main.sidebar {
 /* ═════════════════════════════════════════════════════════════════════════════
    RESPONSIVE
    ═════════════════════════════════════════════════════════════════════════════ */
+/* ═════════════════════════════════════════════════════════════════════════════
+   AGENTS: sidebar "+" button, management panel, create/edit modal
+   ═════════════════════════════════════════════════════════════════════════════ */
+
+/* The theme positions the nav 57px below the viewport but gives it height:100%,
+   leaving its last 57px outside the screen. Once the agent list is tall enough
+   (11 rows on the usual test viewport), that hides the Add agent action even
+   at the bottom of the scroll range. Size this page's nav to the space that is
+   actually visible so every agent count keeps the action reachable. */
+.controller-redmine_agent.action-index #left-nav {
+  height: calc(100vh - 57px);
+  box-sizing: border-box;
+  overflow-y: auto;
+}
+
+#agent-menu-actions {
+  padding: 4px 0 4px 20px;
+}
+
+#agent-add-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  padding: 4px 0;
+  color: #6b778c;
+  font-weight: 500;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+#agent-add-agent:hover {
+  color: #3b7ddd;
+}
+
+/* Per-agent actions on the left-nav rows */
+#main-menu li.agent-row {
+  justify-content: space-between;
+  padding-right: 8px;
+}
+
+/* The theme stretches every menu link across the row; these share it. */
+#main-menu li.agent-row > a {
+  width: auto;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.agent-row-actions {
+  display: none;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+#main-menu li.agent-row:hover .agent-row-actions,
+#main-menu li.agent-row.highlighted .agent-row-actions,
+#main-menu li.agent-row.agent-run-active .agent-row-actions {
+  display: flex;
+}
+
+.agent-row-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  padding: 3px;
+  line-height: 1;
+  color: #6b778c;
+  cursor: pointer;
+}
+
+/* Masks, not inline svg: an svg in the row makes the theme skip its menu icon. */
+.agent-row-actions button::before {
+  content: "";
+  display: block;
+  width: 14px;
+  height: 14px;
+  background-color: currentColor;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: 14px 14px;
+  mask-size: 14px 14px;
+}
+
+.agent-row-actions .act-edit::before {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z'/%3E%3C/svg%3E");
+}
+
+.agent-row-actions .act-run::before {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M8 5v14l11-7z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M8 5v14l11-7z'/%3E%3C/svg%3E");
+}
+
+.agent-row-actions .act-clear::before {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M16.24 3.56 21.19 8.5c.78.79.78 2.05 0 2.84L12 20.53c-1.56 1.56-4.09 1.56-5.66 0L2.81 17c-.78-.79-.78-2.05 0-2.84l10.6-10.6c.79-.78 2.05-.78 2.83 0M4.22 15.58l3.54 3.53c.78.79 2.04.79 2.83 0l3.53-3.53-4.95-4.95-4.95 4.95Z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M16.24 3.56 21.19 8.5c.78.79.78 2.05 0 2.84L12 20.53c-1.56 1.56-4.09 1.56-5.66 0L2.81 17c-.78-.79-.78-2.05 0-2.84l10.6-10.6c.79-.78 2.05-.78 2.83 0M4.22 15.58l3.54 3.53c.78.79 2.04.79 2.83 0l3.53-3.53-4.95-4.95-4.95 4.95Z'/%3E%3C/svg%3E");
+}
+
+.agent-row-actions .act-delete::before {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z'/%3E%3C/svg%3E");
+}
+
+.agent-row-actions button:hover {
+  background: #d7e6ff;
+  color: #0c66e4;
+}
+
+.agent-row-actions button.danger:hover {
+  background: #fdeceb;
+  color: #e74c3c;
+}
+
+.agent-row-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* The theme sets display:flex + align-items:baseline on every button, which
+   drops the label to the bottom edge (and past it, given the inherited
+   line-height). Every agent button re-centers on both axes explicitly. */
+.agent-form-actions button,
+#agent-add-agent {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+/* Create / edit modal */
+.agent-modal-backdrop[hidden] {
+  display: none;
+}
+
+.agent-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.agent-modal {
+  background: #fff;
+  border-radius: 8px;
+  width: 480px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+  padding: 20px 22px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
+}
+
+.agent-modal h3 {
+  margin: 0 0 14px;
+  font-size: 16px;
+  color: #333;
+}
+
+.agent-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+/* Day-of-week/day-of-month rows toggle via the native [hidden] attribute —
+   without this, the unconditional display:flex above would override it. */
+.agent-form-field[hidden] {
+  display: none;
+}
+
+.agent-form-field label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #555;
+}
+
+.agent-form-field input[type="text"],
+.agent-form-field input[type="time"],
+.agent-form-field input[type="number"],
+.agent-form-field textarea,
+.agent-form-field select {
+  border: 1px solid #d0d5dc;
+  border-radius: 6px;
+  padding: 7px 9px;
+  font-size: 13px;
+  font-family: inherit;
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.agent-form-hint {
+  margin: -6px 0 12px;
+  font-size: 11px;
+  color: #888;
+}
+
+.agent-form-samples-link {
+  color: #4a6fa5;
+  cursor: pointer;
+  text-decoration: underline;
+  white-space: nowrap;
+}
+
+.agent-form-examples {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: -6px 0 12px;
+  padding: 8px 10px;
+  background: #f8f9fb;
+  border-radius: 6px;
+  font-size: 11px;
+  color: #777;
+}
+
+/* The unconditional display:flex above would override the [hidden] the link toggles. */
+.agent-form-examples[hidden] {
+  display: none;
+}
+
+.agent-form-example {
+  display: list-item;
+  list-style: disc outside;
+  margin-left: 14px;
+  line-height: 1.5;
+}
+
+.agent-form-example-title {
+  display: block;
+  font-weight: 600;
+  color: #555;
+}
+
+.agent-form-examples-note {
+  line-height: 1.5;
+  font-style: italic;
+}
+
+.agent-sched-fields {
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: #f8f9fb;
+  border-radius: 6px;
+}
+
+/* "Every [4] hours at minute [30]" on one line. */
+.agent-interval-fields {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-interval-fields select {
+  width: auto;
+  /* Narrow values, but the theme draws its arrow inside the box. */
+  min-width: 72px;
+}
+
+.agent-form-section-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #555;
+  margin-bottom: 6px;
+}
+
+.agent-form-error {
+  min-height: 16px;
+  font-size: 12px;
+  color: #dc3545;
+  margin-bottom: 8px;
+}
+
+.agent-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.agent-form-actions button {
+  padding: 7px 16px;
+  border-radius: 6px;
+  border: 1px solid #d0d5dc;
+  background: #fff;
+  color: #333;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.agent-form-actions button.primary {
+  background: #3b7ddd;
+  border-color: #3b7ddd;
+  color: #fff;
+  font-weight: 600;
+}
+
+.agent-form-actions button.primary:hover {
+  background: #2e6bc4;
+}
+
 @media (max-width: 768px) {
-  #redmine-agent-page {
-    height: calc(100vh - 120px);
-  }
-
-  .redmine-agent-msg {
+  .redmine-agent-msg.user {
     max-width: 90%;
-  }
-
-  .redmine-agent-msg.agent.approval-pending {
-    max-width: 95%;
   }
 
   .approval-actions {
